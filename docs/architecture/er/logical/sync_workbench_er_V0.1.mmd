@@ -1,0 +1,167 @@
+```mermaid
+erDiagram
+    SUBJECT ||--o{ DEVICE_RUN : has
+    SUBJECT ||--o{ ANCHOR : has
+    SUBJECT ||--o{ SYNC_MODEL : has
+    SUBJECT ||--o{ MAPPING_VERSION : has
+
+    DEVICE_RUN ||--o{ RUN_SAMPLE : contains
+    DEVICE_RUN ||--o{ RUN_ASSET : has
+    DEVICE_RUN ||--o{ RUN_TIMELINE_MODEL : has
+
+    RUN_SAMPLE ||--o{ SAMPLE_ARTIFACT : has
+    RUN_SAMPLE ||--o{ SAMPLE_TIME_ESTIMATE : has_time_estimate
+    RUN_SAMPLE ||--o{ ANCHOR_MEMBER : participates_in
+    RUN_SAMPLE ||--o{ SAMPLE_MAPPING : source_sample
+    RUN_SAMPLE ||--o{ SAMPLE_MAPPING : target_sample
+
+    RUN_TIMELINE_MODEL ||--o{ SAMPLE_TIME_ESTIMATE : assigns_time
+
+    ANCHOR ||--o{ ANCHOR_MEMBER : contains
+    SYNC_MODEL ||--o{ MODEL_ANCHOR : selects
+    ANCHOR ||--o{ MODEL_ANCHOR : selected_for
+
+    DEVICE_RUN ||--o{ SYNC_MODEL : source_run
+    DEVICE_RUN ||--o{ SYNC_MODEL : target_run
+    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : source_timeline
+    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : target_timeline
+
+    DEVICE_RUN ||--o{ MAPPING_VERSION : source_run
+    DEVICE_RUN ||--o{ MAPPING_VERSION : target_run
+    SYNC_MODEL o|--o{ MAPPING_VERSION : basis_for
+
+    MAPPING_VERSION ||--o{ SAMPLE_MAPPING : contains
+
+    SUBJECT {
+        string subject_id PK
+        string experiment_date
+        string notes
+    }
+
+    DEVICE_RUN {
+        string subject_id PK, FK
+        string run_id PK
+        string device_type
+        datetime start_wallclock_est
+        datetime end_wallclock_est
+        float nominal_fps
+        string notes
+    }
+
+    RUN_SAMPLE {
+        string subject_id PK, FK
+        string run_id PK, FK
+        int sample_index PK
+        string sample_kind
+        string notes
+    }
+
+    RUN_ASSET {
+        string asset_id PK
+        string subject_id PK, FK
+        string run_id PK, FK
+        string asset_role
+        string storage_key
+        string asset_ref
+        string notes
+    }
+
+    SAMPLE_ARTIFACT {
+        string subject_id PK, FK
+        string run_id PK, FK
+        int sample_index PK, FK
+        string artifact_role PK
+        string artifact_ref
+        string notes
+    }
+
+    RUN_TIMELINE_MODEL {
+        string subject_id PK, FK
+        string run_id PK, FK
+        string timeline_model_id PK
+        string timeline_model_name
+        string timeline_model_type
+        string source_time_basis
+        string parameters_json
+        datetime created_at
+        string notes
+    }
+
+    SAMPLE_TIME_ESTIMATE {
+        string subject_id PK, FK
+        string run_id PK, FK
+        string timeline_model_id PK, FK
+        int sample_index PK, FK
+        datetime time_value
+        string time_kind
+        datetime reference_time
+        float residual_ms
+        string notes
+    }
+
+    ANCHOR {
+        string subject_id PK, FK
+        string anchor_id PK
+        string anchor_type
+        string label
+        float confidence
+        string notes
+    }
+
+    ANCHOR_MEMBER {
+        string subject_id PK, FK
+        string anchor_id PK, FK
+        string run_id PK, FK
+        int sample_index PK, FK
+        string member_role
+        float confidence
+        string notes
+    }
+
+    SYNC_MODEL {
+        string subject_id PK, FK
+        string sync_model_id PK
+        string source_run_id
+        string target_run_id
+        string source_timeline_model_id
+        string target_timeline_model_id
+        string model_name
+        string model_type
+        string extrapolation_policy
+        string parameters_json
+        string notes
+    }
+
+    MODEL_ANCHOR {
+        string subject_id PK, FK
+        string sync_model_id PK, FK
+        string anchor_id PK, FK
+    }
+
+    MAPPING_VERSION {
+        string subject_id PK, FK
+        string mapping_version_id PK
+        string source_run_id
+        string target_run_id
+        string mapping_name
+        string mapping_method
+        datetime created_at
+        string parent_mapping_version_id
+        string source_sync_model_id
+        string notes
+    }
+
+    SAMPLE_MAPPING {
+        string subject_id PK, FK
+        string mapping_version_id PK, FK
+        string source_run_id PK
+        int source_sample_index PK
+        string target_run_id PK
+        int target_sample_index PK
+        float predicted_minus_estimated_ms
+        int rank
+        bool is_primary
+        string mapping_region_type
+        string support_status
+        float confidence_score
+    }
