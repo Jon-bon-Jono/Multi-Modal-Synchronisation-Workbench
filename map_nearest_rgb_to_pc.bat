@@ -1,0 +1,13 @@
+syncwb map-nearest ^
+  --sqlite "workbench.sqlite" ^
+  --subject "19_MM" ^
+  --source-run "Session-2024-January-15 09-47-41-274452" ^
+  --source-device "kinect_rgb" ^
+  --source-timeline "rgb_wallclock_from_pts" ^
+  --target-run "Session-2024-January-15 09-43-27-126274" ^
+  --target-device "radar_pc" ^
+  --target-timeline "radar_pc_linear_from_index" ^
+  --mapping-version "rgb_to_pc_initial_v001" ^
+  --top-k 3 ^
+  --overwrite ^
+  --diagnostics-csv "reports/rgb_to_pc_initial_v001_diagnostics.csv"
