@@ -1,0 +1,15 @@
+flowchart TD
+    A[device_runs.zst] --> R[TempPackageReader]
+    B[rgb_samples.zst] --> R
+    C[radar_pc_samples.zst] --> R
+    R --> V[Input validation]
+    V --> T[TempToCanonicalTransformer]
+    T --> S[SUBJECT / DEVICE_RUN / RUN_SAMPLE]
+    T --> A2[RUN_ASSET]
+    T --> M[RUN_TIMELINE_MODEL]
+    T --> E[SAMPLE_TIME_ESTIMATE]
+    S --> DB[(SQLite store)]
+    A2 --> DB
+    M --> DB
+    E --> DB
+    T --> REP[Reports]

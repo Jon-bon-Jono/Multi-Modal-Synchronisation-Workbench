@@ -1,0 +1,24 @@
+flowchart LR
+    subgraph Future Frontend
+        GUI[Qt GUI]
+        CLI[CLI]
+        NB[Notebook]
+    end
+
+    subgraph Backend
+        SERVICES[Application services]
+        DOMAIN[Core domain tables and model classes]
+        STORAGE[CoreStore]
+        ASSETS[AssetResolver]
+    end
+
+    GUI --> SERVICES
+    CLI --> SERVICES
+    NB --> SERVICES
+    SERVICES --> DOMAIN
+    SERVICES --> STORAGE
+    SERVICES --> ASSETS
+
+    STORAGE --> SQLITE[(SQLite)]
+    STORAGE --> PARQUET[Parquet/CSV]
+    ASSETS --> ROOTS[Local roots YAML]

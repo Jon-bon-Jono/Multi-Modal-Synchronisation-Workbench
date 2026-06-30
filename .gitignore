@@ -1,7 +1,14 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[codz]
+*.py[cod]
 *$py.class
+
+reports/
+canonical_export/
+
+# Database
+*.sqlite
+*.db
 
 # C extensions
 *.so
@@ -140,6 +147,7 @@ celerybeat.pid
 .venv
 env/
 venv/
+.venv/
 ENV/
 env.bak/
 venv.bak/
