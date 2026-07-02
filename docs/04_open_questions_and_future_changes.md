@@ -65,6 +65,8 @@ The current design strongly suggests smoothing point-cloud timestamps by regress
 
 **Current leaning:** keep both, but make the smoothed timeline the normal starting point.
 
+**v0.1 implementation choice:** both `radar_pc_observed_wallclock` and `radar_pc_linear_from_index` are generated. The linear-from-index timeline is the normal starting point for initial RGB-to-radar mapping.
+
 ---
 
 ## 2.4 How should raw radar timing uncertainty be represented?
@@ -181,6 +183,7 @@ Too many candidates create noise. Too few make debugging harder.
 
 **Current leaning:** keep the top few only, with one primary match.
 
+**v0.1 implementation choice:** the nearest-time mapper supports top-k candidates through the `top_k` parameter. The value used is stored in `MAPPING_VERSION.parameters_json`.
 ---
 
 ## 3.3 What diagnostics belong in canonical mapping rows?
@@ -197,6 +200,8 @@ Possible diagnostics include:
 Not all of these belong in the core table.
 
 **Current leaning:** keep the canonical mapping rows compact and move richer diagnostics to derived artifacts.
+
+**v0.1 implementation choice:** canonical `SAMPLE_MAPPING` rows store `predicted_minus_estimated_ms`, `rank`, `is_primary`, `mapping_region_type`, `support_status`, and `confidence_score`. Additional mapping-generation parameters are stored in `MAPPING_VERSION.parameters_json`.
 
 ---
 
@@ -377,12 +382,11 @@ These are plausible future extensions, not current requirements.
 
 ## 8. Immediate next decisions worth making
 
-The most useful near-term decisions are:
+The most useful near-term decisions after v0.1 are:
 
-1. settle the first controlled vocabularies for `time_kind`, `support_status`, and `asset_role`,
-2. define the first extrapolation policy options,
-3. decide what minimum diagnostics every mapping row should store,
-4. define the first local asset-root configuration format,
-5. decide whether anchor confidence is human-only.
-
-These are the questions most likely to unblock implementation without forcing a major redesign.
+1. settle the artifact/payload storage format for pose arrays, activity dictionaries, and radar point-cloud arrays,
+2. decide whether to add extra `SAMPLE_ARTIFACT` fields such as `artifact_member_key`, `artifact_format`, `payload_shape`, and `payload_dtype`,
+3. decide how much sample-level scalar payload summary should live in canonical tables versus derived summary artifacts,
+4. define the first manual-anchor import/export format,
+5. decide whether to add an `ANCHOR_SESSION` table before implementing the sandbox anchoring GUI,
+6. implement and test the piecewise affine feasibility sandbox before promoting it to a core workflow.

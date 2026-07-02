@@ -40,11 +40,57 @@ def build_parser() -> argparse.ArgumentParser:
     mapn.add_argument("--extrapolation-policy", default="disallow")
     mapn.add_argument("--allow-numeric-identity", action="store_true")
     mapn.add_argument(
+        "--source-window-policy",
+        choices=["target-overlap", "all"],
+        default="target-overlap",
+        help="Which source samples to generate mappings for. Default maps only source samples inside target timeline coverage.",
+    )
+    mapn.add_argument("--source-margin-ms", type=float, default=0.0)
+    mapn.add_argument(
+        "--primary-policy",
+        choices=["supported-only", "within-max-delta", "nearest-any"],
+        default="supported-only",
+    )
+    mapn.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace an existing mapping version and delete its existing SAMPLE_MAPPING rows before writing new rows.",
     )
     mapn.add_argument("--diagnostics-csv", default=None)
+
+    mapall = sub.add_parser(
+        "map-nearest-all",
+        help="Generate nearest-time mappings for all overlapping source-target run pairs",
+    )
+    mapall.add_argument("--sqlite", required=True, help="SQLite store path")
+    mapall.add_argument("--source-device", default="kinect_rgb")
+    mapall.add_argument("--source-timeline", default="rgb_wallclock_from_pts")
+    mapall.add_argument("--target-device", default="radar_pc")
+    mapall.add_argument("--target-timeline", default="radar_pc_linear_from_index")
+    mapall.add_argument("--mapping-version-prefix", required=True)
+    mapall.add_argument("--top-k", type=int, default=3)
+    mapall.add_argument("--min-overlap-sec", type=float, default=5.0)
+    mapall.add_argument("--weak-support-threshold-ms", type=float, default=75.0)
+    mapall.add_argument("--max-allowed-delta-ms", type=float, default=200.0)
+    mapall.add_argument("--extrapolation-policy", default="disallow")
+    mapall.add_argument("--allow-numeric-identity", action="store_true")
+    mapall.add_argument(
+        "--source-window-policy",
+        choices=["target-overlap", "all"],
+        default="target-overlap",
+    )
+    mapall.add_argument("--source-margin-ms", type=float, default=0.0)
+    mapall.add_argument(
+        "--primary-policy",
+        choices=["supported-only", "within-max-delta", "nearest-any"],
+        default="supported-only",
+    )
+    mapall.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing mapping versions generated with the same deterministic IDs.",
+    )
+    mapall.add_argument("--pair-report-csv", default=None)
 
     return parser
 
@@ -94,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
                 extrapolation_policy=args.extrapolation_policy,
                 allow_numeric_identity=args.allow_numeric_identity,
                 overwrite=args.overwrite,
+                source_window_policy=args.source_window_policy,
+                source_margin_ms=args.source_margin_ms,
+                primary_policy=args.primary_policy,
             )
         except ValueError as exc:
             print(f"Error: {exc}")
@@ -103,6 +152,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.diagnostics_csv:
             Path(args.diagnostics_csv).parent.mkdir(parents=True, exist_ok=True)
             result.diagnostics.to_csv(args.diagnostics_csv, index=False)
+        return 0
+
+    if args.command == "map-nearest-all":
+        service = MappingService(args.sqlite)
+        result = service.generate_nearest_mappings_for_overlaps(
+            source_device=args.source_device,
+            source_timeline=args.source_timeline,
+            target_device=args.target_device,
+            target_timeline=args.target_timeline,
+            mapping_version_prefix=args.mapping_version_prefix,
+            top_k=args.top_k,
+            min_overlap_sec=args.min_overlap_sec,
+            source_window_policy=args.source_window_policy,
+            source_margin_ms=args.source_margin_ms,
+            weak_support_threshold_ms=args.weak_support_threshold_ms,
+            max_allowed_delta_ms=args.max_allowed_delta_ms,
+            extrapolation_policy=args.extrapolation_policy,
+            allow_numeric_identity=args.allow_numeric_identity,
+            primary_policy=args.primary_policy,
+            overwrite=args.overwrite,
+        )
+
+        if result.pair_report.empty:
+            print("No source-target run pairs found.")
+        else:
+            print(result.pair_report.to_string(index=False))
+
+        if args.pair_report_csv:
+            Path(args.pair_report_csv).parent.mkdir(parents=True, exist_ok=True)
+            result.pair_report.to_csv(args.pair_report_csv, index=False)
+
         return 0
 
     raise AssertionError(f"Unhandled command {args.command}")

@@ -122,9 +122,10 @@ def test_ingest_and_map(tmp_path: Path):
     assert len(mapping.sync_model) == 1
     assert mapping.sync_model.iloc[0]["model_type"] == "identity_time"
     assert len(mapping.mapping_version) == 1
-    assert len(mapping.sample_mapping) == 12  # 4 RGB samples * top-k 3
-    assert mapping.sample_mapping["source_sample_index"].nunique() == 4
+    assert len(mapping.sample_mapping) == 9  # 3 source samples inside target overlap * top-k 3
+    assert mapping.sample_mapping["source_sample_index"].nunique() == 3
     assert mapping.sample_mapping["is_primary"].sum() >= 3
+    assert set(mapping.mapping_version.columns).issuperset({"parameters_json"})
 
     stored = store.read_table("SAMPLE_MAPPING")
     assert "rgb_to_pc_initial_v001" in set(stored["mapping_version_id"])
@@ -156,7 +157,21 @@ def test_ingest_and_map(tmp_path: Path):
         stored_after_overwrite["mapping_version_id"] == "rgb_to_pc_initial_v001"
     ]
 
-    assert len(stored_after_overwrite) == 4  # 4 RGB samples * top-k 1
+    assert len(stored_after_overwrite) == 3  # 3 source samples inside target overlap * top-k 1
     assert set(stored_after_overwrite["rank"].astype(int)) == {1}
+
+    batch = MappingService(sqlite_path).generate_nearest_mappings_for_overlaps(
+        source_device="kinect_rgb",
+        source_timeline="rgb_wallclock_from_pts",
+        target_device="radar_pc",
+        target_timeline="radar_pc_linear_from_index",
+        mapping_version_prefix="batch_rgb_to_pc_v001",
+        top_k=1,
+    )
+
+    assert not batch.pair_report.empty
+    assert "mapped" in set(batch.pair_report["status"])
+    mapped_rows = batch.pair_report[batch.pair_report["status"] == "mapped"]
+    assert int(mapped_rows.iloc[0]["sample_mapping_rows"]) == 3
 
 

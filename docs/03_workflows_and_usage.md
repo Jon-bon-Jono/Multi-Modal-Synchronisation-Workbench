@@ -354,6 +354,22 @@ This separation matters because the same sync model may support different matchi
 
 For example, one mapping version may keep the top 3 candidates, while another may keep only the primary candidate.
 
+### 12.2 v0.1 initial nearest-time mapping
+
+The v0.1 backend supports a crude nearest-time mapping workflow intended for prealignment and later anchor placement.
+
+This workflow creates:
+
+- an explicit `SYNC_MODEL` with `model_type = identity_time`,
+- one `MAPPING_VERSION`,
+- top-k `SAMPLE_MAPPING` candidate rows.
+
+The initial mapping is not a final synchronisation result. It is a navigation aid and diagnostic baseline.
+
+By default, mappings are generated only for source samples whose predicted target time lies within the target timeline coverage. This avoids filling the database with obviously invalid mappings when source and target runs only partially overlap.
+
+By default, `is_primary = true` is assigned only to the rank-1 candidate when `support_status = supported`. Weakly supported candidates remain available as candidate rows but are not primary unless a less conservative primary policy is explicitly selected.
+
 ---
 
 ## 13. Workflow J — Inspect diagnostics
@@ -398,6 +414,10 @@ The point is to preserve the lineage of results.
 
 This matters for debugging and for later comparison.
 
+For v0.1 nearest-time mappings, the CLI refuses to reuse an existing `mapping_version_id` unless explicit overwrite is requested. If overwrite is requested, existing `SAMPLE_MAPPING` rows for that mapping version are deleted before the regenerated rows are written. This avoids stale candidate rows when parameters such as `top_k` are changed.
+
+The preferred workflow is still to create a new `mapping_version_id` when comparing meaningfully different mapping policies.
+
 ---
 
 ## 15. Workflow L — Share subsets with other users
@@ -416,3 +436,4 @@ A sensible sharing pattern is:
 That way the same metadata can function across different machines and storage layouts.
 
 ---
+

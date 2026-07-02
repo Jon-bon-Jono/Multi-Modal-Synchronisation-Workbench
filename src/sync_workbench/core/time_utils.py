@@ -45,10 +45,20 @@ def format_datetime(value: Any) -> str:
 
 
 def datetime_to_epoch_seconds(value: Any) -> float:
+    """Convert a project datetime string to epoch seconds consistently.
+
+    Project datetime strings are timezone-naive. For numeric fitting and
+    nearest-time comparisons, interpret them as UTC-like naive timestamps so the
+    result is independent of the local machine timezone.
+    """
     ts = parse_datetime(value)
     if pd.isna(ts):
         return float("nan")
-    return float(ts.timestamp())
+
+    if getattr(ts, "tzinfo", None) is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+
+    return float((ts - pd.Timestamp("1970-01-01")) / pd.Timedelta(seconds=1))
 
 
 def epoch_seconds_to_datetime_str(value: float) -> str:

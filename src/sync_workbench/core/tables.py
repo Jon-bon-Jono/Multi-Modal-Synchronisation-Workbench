@@ -184,6 +184,7 @@ TABLE_SPECS: dict[str, TableSpec] = {
             "created_at",
             "parent_mapping_version_id",
             "source_sync_model_id",
+            "parameters_json",
             "notes",
         ),
         (

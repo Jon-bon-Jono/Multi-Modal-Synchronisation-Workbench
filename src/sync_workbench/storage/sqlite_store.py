@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from sync_workbench.core.tables import TABLE_SPECS, align_to_spec
@@ -104,16 +105,77 @@ class SQLiteCoreStore:
         return int(cursor.rowcount or 0)
     
     def replace_or_append_without_key_conflicts(self, name: str, new_rows: pd.DataFrame) -> None:
-        """Append rows after deleting existing rows with matching logical keys."""
-        spec = TABLE_SPECS[name]
+        """Append rows after deleting existing rows with matching logical keys.
+
+        SQLite does not preserve pandas dtypes reliably when tables are first
+        created from empty dataframes. In particular, integer key columns may be
+        read back as object/string columns. Therefore key comparison is done on
+        normalised string representations rather than raw pandas dtypes.
+        """
+        if name not in TABLE_SPECS:
+            raise KeyError(f"Unknown canonical table: {name}")
+
+        new_rows = align_to_spec(name, new_rows)
+
+        if new_rows.empty:
+            return
+
         current = self.read_table(name)
+
         if current.empty:
             self.write_table(name, new_rows, if_exists="append")
             return
-        if new_rows.empty:
-            return
+
+        spec = TABLE_SPECS[name]
         key_cols = list(spec.key)
-        current_keyed = current.merge(new_rows[key_cols].drop_duplicates(), on=key_cols, how="left", indicator=True)
-        kept = current_keyed.loc[current_keyed["_merge"] == "left_only", current.columns]
-        combined = pd.concat([kept, align_to_spec(name, new_rows)], ignore_index=True)
+
+        missing_current = [col for col in key_cols if col not in current.columns]
+        missing_new = [col for col in key_cols if col not in new_rows.columns]
+        if missing_current or missing_new:
+            raise KeyError(
+                f"Cannot upsert {name}; missing key columns. "
+                f"current missing={missing_current}, new missing={missing_new}"
+            )
+
+        current_keys = self._normalised_key_frame(current, key_cols)
+        new_keys = self._normalised_key_frame(new_rows, key_cols).drop_duplicates()
+
+        current_with_keys = pd.concat(
+            [
+                current.reset_index(drop=True),
+                current_keys.add_prefix("__key__").reset_index(drop=True),
+            ],
+            axis=1,
+        )
+        new_keys = new_keys.add_prefix("__key__")
+
+        merged = current_with_keys.merge(
+            new_keys,
+            on=list(new_keys.columns),
+            how="left",
+            indicator=True,
+        )
+
+        kept = merged.loc[merged["_merge"] == "left_only", current.columns]
+        combined = pd.concat([kept, new_rows], ignore_index=True)
+
         self.write_table(name, combined, if_exists="replace")
+
+    @staticmethod
+    def _normalised_key_frame(df: pd.DataFrame, key_cols: list[str]) -> pd.DataFrame:
+        """Return key columns as stable strings for dtype-independent matching."""
+        out = pd.DataFrame(index=df.index)
+        for col in key_cols:
+            series = df[col]
+
+            numeric = pd.to_numeric(series, errors="coerce")
+            is_integer_like = numeric.notna() & np.isclose(numeric, np.round(numeric))
+
+            normalised = series.astype(str).str.strip()
+            normalised.loc[is_integer_like] = numeric.loc[is_integer_like].round().astype("int64").astype(str)
+
+            # Normalise common missing-value spellings.
+            normalised = normalised.replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+            out[col] = normalised
+
+        return out

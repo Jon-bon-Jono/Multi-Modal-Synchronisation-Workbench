@@ -29,6 +29,17 @@ class NearestMappingConfig:
     extrapolation_policy: str = "disallow"
     allow_numeric_identity: bool = False
 
+    # Controls whether mappings are generated for every source sample or only
+    # source samples whose predicted target time lies inside the target timeline.
+    # Valid values: "target_overlap", "all".
+    source_window_policy: str = "target_overlap"
+
+    # Optional margin around target timeline coverage when using target_overlap.
+    source_margin_ms: float = 0.0
+
+    # Valid values: "supported_only", "within_max_delta", "nearest_any".
+    primary_policy: str = "supported_only"
+
 
 def generate_identity_sync_model_row(
     source: TimelineSelection,
@@ -73,8 +84,8 @@ def nearest_mapping_rows(
     config: NearestMappingConfig,
 ) -> pd.DataFrame:
     """Generate SAMPLE_MAPPING rows using identity-time nearest-neighbour search."""
-    src_numeric, src_kind = _timeline_numeric_values(source_times)
-    tgt_numeric, tgt_kind = _timeline_numeric_values(target_times)
+    src_numeric, src_kind = timeline_numeric_values(source_times)
+    tgt_numeric, tgt_kind = timeline_numeric_values(target_times)
 
     if src_kind != tgt_kind:
         raise ValueError(f"Timeline coordinate mismatch: source={src_kind}, target={tgt_kind}")
@@ -83,7 +94,7 @@ def nearest_mapping_rows(
             "Numeric identity mapping is disabled by default. Use wallclock-like datetime timelines, "
             "or explicitly enable allow_numeric_identity when the numeric coordinates are compatible."
         )
-
+    
     src = source_times.copy()
     tgt = target_times.copy()
     src["_t"] = src_numeric
@@ -97,6 +108,10 @@ def nearest_mapping_rows(
     target_sample_indices = tgt["sample_index"].astype(int).to_numpy()
     t_min = float(np.nanmin(target_values))
     t_max = float(np.nanmax(target_values))
+
+    src = _filter_source_samples_by_target_window(src, t_min, t_max, config)
+    if src.empty:
+        return align_to_spec("SAMPLE_MAPPING", pd.DataFrame())
 
     rows: list[dict[str, object]] = []
     for _, src_row in src.iterrows():
@@ -126,14 +141,13 @@ def nearest_mapping_rows(
                     "target_sample_index": target_sample_index,
                     "predicted_minus_estimated_ms": delta_ms,
                     "rank": int(rank),
-                    "is_primary": bool(rank == 1 and support in {"supported", "weak_support"}),
+                    "is_primary": _is_primary_mapping(rank, support, delta_ms, config),
                     "mapping_region_type": region,
                     "support_status": support,
                     "confidence_score": _confidence(delta_ms, support, config.max_allowed_delta_ms),
                 }
             )
     return align_to_spec("SAMPLE_MAPPING", pd.DataFrame(rows))
-
 
 def mapping_version_row(
     source: TimelineSelection,
@@ -142,7 +156,8 @@ def mapping_version_row(
     mapping_version_id: str,
     sync_model_id: str,
     mapping_name: str | None = None,
-    mapping_method: str = "initial_nearest_for_anchoring"
+    mapping_method: str = "initial_nearest_for_anchoring",
+    parameters_json: str | None = None,
 ) -> dict[str, object]:
     return {
         "subject_id": source.subject_id,
@@ -152,15 +167,42 @@ def mapping_version_row(
         "target_run_id": target.run_id,
         "target_device_type": target.device_type,
         "mapping_name": mapping_name or mapping_version_id,
-        "mapping_method": mapping_method, #"nearest_predicted_time"
+        "mapping_method": mapping_method,
         "created_at": utc_now_str(),
         "parent_mapping_version_id": "",
         "source_sync_model_id": sync_model_id,
+        "parameters_json": parameters_json or "",
         "notes": "Crude nearest-time mapping generated to help anchor placement/navigation.",
     }
 
+def _filter_source_samples_by_target_window(
+    src: pd.DataFrame,
+    target_min: float,
+    target_max: float,
+    config: NearestMappingConfig,
+) -> pd.DataFrame:
+    """Restrict source samples before candidate generation.
 
-def _timeline_numeric_values(df: pd.DataFrame) -> tuple[pd.Series, str]:
+    This prevents writing thousands of obviously invalid SAMPLE_MAPPING rows when
+    source and target runs only partially overlap.
+    """
+    policy = str(config.source_window_policy or "target_overlap").replace("-", "_")
+    margin_sec = max(0.0, float(config.source_margin_ms)) / 1000.0
+
+    if policy == "all":
+        return src
+
+    if policy == "target_overlap":
+        lower = target_min - margin_sec
+        upper = target_max + margin_sec
+        return src[(src["_t"] >= lower) & (src["_t"] <= upper)]
+
+    raise ValueError(
+        f"Unknown source_window_policy={config.source_window_policy!r}. "
+        "Expected 'target_overlap' or 'all'."
+    )
+
+def timeline_numeric_values(df: pd.DataFrame) -> tuple[pd.Series, str]:
     if "time_value_datetime" in df.columns:
         dt_text = df["time_value_datetime"].fillna("").astype(str).str.strip()
         has_datetime = dt_text.ne("") & ~dt_text.str.lower().isin({"nan", "none", "nat"})
@@ -194,6 +236,34 @@ def _support_labels(
         return "interpolation", "weak_support"
     return "interpolation", "supported"
 
+def _is_primary_mapping(
+    rank: int,
+    support_status: str,
+    delta_ms: float,
+    config: NearestMappingConfig,
+) -> bool:
+    """Decide whether a candidate should be marked as the selected primary row."""
+    if int(rank) != 1:
+        return False
+
+    policy = str(config.primary_policy or "supported_only").replace("-", "_")
+
+    if policy == "supported_only":
+        return support_status == "supported"
+
+    if policy == "within_max_delta":
+        return (
+            support_status not in {"outside_run", "missing_source_time", "missing_target"}
+            and abs(float(delta_ms)) <= float(config.max_allowed_delta_ms)
+        )
+
+    if policy == "nearest_any":
+        return support_status not in {"outside_run", "missing_source_time", "missing_target"}
+
+    raise ValueError(
+        f"Unknown primary_policy={config.primary_policy!r}. "
+        "Expected 'supported_only', 'within_max_delta', or 'nearest_any'."
+    )
 
 def _confidence(delta_ms: float, support_status: str, max_allowed_delta_ms: float) -> float:
     if support_status in {"outside_run", "missing_source_time", "missing_target"}:

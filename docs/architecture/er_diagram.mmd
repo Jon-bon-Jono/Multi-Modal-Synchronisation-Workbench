@@ -16,6 +16,8 @@ erDiagram
     RUN_SAMPLE ||--o{ SAMPLE_MAPPING : target_sample
 
     RUN_TIMELINE_MODEL ||--o{ SAMPLE_TIME_ESTIMATE : assigns_time
+    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : source_timeline
+    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : target_timeline
 
     ANCHOR ||--o{ ANCHOR_MEMBER : contains
     SYNC_MODEL ||--o{ MODEL_ANCHOR : selects
@@ -23,9 +25,6 @@ erDiagram
 
     DEVICE_RUN ||--o{ SYNC_MODEL : source_run
     DEVICE_RUN ||--o{ SYNC_MODEL : target_run
-    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : source_timeline
-    RUN_TIMELINE_MODEL o|--o{ SYNC_MODEL : target_timeline
-
     DEVICE_RUN ||--o{ MAPPING_VERSION : source_run
     DEVICE_RUN ||--o{ MAPPING_VERSION : target_run
     SYNC_MODEL o|--o{ MAPPING_VERSION : basis_for
@@ -41,7 +40,7 @@ erDiagram
     DEVICE_RUN {
         string subject_id PK, FK
         string run_id PK
-        string device_type
+        string device_type PK
         datetime start_wallclock_est
         datetime end_wallclock_est
         float nominal_fps
@@ -51,6 +50,7 @@ erDiagram
     RUN_SAMPLE {
         string subject_id PK, FK
         string run_id PK, FK
+        string device_type PK, FK
         int sample_index PK
         string sample_kind
         string notes
@@ -58,8 +58,9 @@ erDiagram
 
     RUN_ASSET {
         string asset_id PK
-        string subject_id PK, FK
-        string run_id PK, FK
+        string subject_id FK
+        string run_id FK
+        string device_type FK
         string asset_role
         string storage_key
         string asset_ref
@@ -69,6 +70,7 @@ erDiagram
     SAMPLE_ARTIFACT {
         string subject_id PK, FK
         string run_id PK, FK
+        string device_type PK, FK
         int sample_index PK, FK
         string artifact_role PK
         string artifact_ref
@@ -78,6 +80,7 @@ erDiagram
     RUN_TIMELINE_MODEL {
         string subject_id PK, FK
         string run_id PK, FK
+        string device_type PK, FK
         string timeline_model_id PK
         string timeline_model_name
         string timeline_model_type
@@ -90,11 +93,13 @@ erDiagram
     SAMPLE_TIME_ESTIMATE {
         string subject_id PK, FK
         string run_id PK, FK
+        string device_type PK, FK
         string timeline_model_id PK, FK
         int sample_index PK, FK
-        datetime time_value
+        datetime time_value_datetime
+        float time_value_sec
         string time_kind
-        datetime reference_time
+        datetime reference_time_datetime
         float residual_ms
         string notes
     }
@@ -112,6 +117,7 @@ erDiagram
         string subject_id PK, FK
         string anchor_id PK, FK
         string run_id PK, FK
+        string device_type PK, FK
         int sample_index PK, FK
         string member_role
         float confidence
@@ -122,7 +128,9 @@ erDiagram
         string subject_id PK, FK
         string sync_model_id PK
         string source_run_id
+        string source_device_type
         string target_run_id
+        string target_device_type
         string source_timeline_model_id
         string target_timeline_model_id
         string model_name
@@ -142,12 +150,15 @@ erDiagram
         string subject_id PK, FK
         string mapping_version_id PK
         string source_run_id
+        string source_device_type
         string target_run_id
+        string target_device_type
         string mapping_name
         string mapping_method
         datetime created_at
         string parent_mapping_version_id
         string source_sync_model_id
+        string parameters_json
         string notes
     }
 
@@ -155,8 +166,10 @@ erDiagram
         string subject_id PK, FK
         string mapping_version_id PK, FK
         string source_run_id PK
+        string source_device_type PK
         int source_sample_index PK
         string target_run_id PK
+        string target_device_type PK
         int target_sample_index PK
         float predicted_minus_estimated_ms
         int rank

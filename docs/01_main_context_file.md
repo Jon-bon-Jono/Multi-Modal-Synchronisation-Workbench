@@ -705,6 +705,20 @@ Areas that are still less final include:
 
 These should be treated as current design direction rather than immutable final truth.
 
+### 17.1 Current v0.1 implementation status
+
+The v0.1 backend now implements a narrow but working first slice of the workbench:
+
+- temporary ingestion from `device_runs.zst`, `rgb_samples.zst`, and `radar_pc_samples.zst`,
+- generation of canonical `SUBJECT`, `DEVICE_RUN`, `RUN_SAMPLE`, `RUN_ASSET`, `RUN_TIMELINE_MODEL`, and `SAMPLE_TIME_ESTIMATE` tables,
+- baseline RGB and radar point-cloud timeline models,
+- initial nearest-time RGB-to-radar mappings,
+- mapping provenance through an explicit `identity_time` `SYNC_MODEL`,
+- versioned `MAPPING_VERSION` and `SAMPLE_MAPPING` rows,
+- conservative primary-mapping selection by default.
+
+This does not yet implement artifact payload storage, manual anchors, piecewise affine synchronisation, or a GUI.
+
 ---
 
 ## 18. Compact project summary

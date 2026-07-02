@@ -68,7 +68,7 @@ syncwb ingest-temp \
 syncwb summary --sqlite workbench.sqlite
 ```
 
-## Generate an initial RGB-to-radar mapping
+## Generate an initial RGB-to-radar mapping for one source/target run pair
 
 ```bash
 syncwb map-nearest \
@@ -81,14 +81,40 @@ syncwb map-nearest \
   --target-device radar_pc \
   --target-timeline radar_pc_linear_from_index \
   --mapping-version rgb_to_pc_initial_v001 \
-  --top-k 3
+  --top-k 3 \
+  --source-window-policy target-overlap \
+  --source-margin-ms 100 \
+  --primary-policy supported-only
 ```
 
 The command writes:
 
 - one `SYNC_MODEL` row with `model_type = identity_time`,
-- one `MAPPING_VERSION` row,
-- top-k `SAMPLE_MAPPING` rows.
+- one `MAPPING_VERSION` row with mapping parameters in `parameters_json`,
+- top-k `SAMPLE_MAPPING` candidate rows.
+
+By default, the command refuses to reuse an existing mapping_version_id. Use --overwrite only when you intentionally want to replace an existing mapping version. When --overwrite is used, existing SAMPLE_MAPPING rows for that mapping version are deleted before regenerated rows are written.
+
+## Generate mappings for all overlapping RGB/radar run pairs
+
+```bash
+syncwb map-nearest-all \
+  --sqlite workbench.sqlite \
+  --source-device kinect_rgb \
+  --source-timeline rgb_wallclock_from_pts \
+  --target-device radar_pc \
+  --target-timeline radar_pc_linear_from_index \
+  --mapping-version-prefix initial_rgb_to_pc_v001 \
+  --top-k 3 \
+  --min-overlap-sec 5 \
+  --source-window-policy target-overlap \
+  --source-margin-ms 100 \
+  --primary-policy supported-only \
+  --pair-report-csv reports/initial_rgb_to_pc_v001_pair_report.csv
+```
+
+This command searches for source-target run pairs from the same subject whose selected timelines overlap by at least `--min-overlap-sec`, generates deterministic mapping version IDs using the prefix, and writes a pair report.
+
 
 ## Important v0.1 design choices
 
@@ -120,6 +146,18 @@ The written `SAMPLE_TIME_ESTIMATE` table uses:
 
 This is a practical v0.1 adjustment to avoid representing relative seconds such
 as PTS or Kinect elapsed time as fake datetimes.
+
+### Primary mapping policy
+
+The default `primary_policy` is `supported-only`.
+
+This means `is_primary=True` is assigned only to the rank-1 candidate when `support_status=supported`. Weakly supported candidates remain in `SAMPLE_MAPPING`, but they are not primary unless a less conservative policy such as `within-max-delta` or `nearest-any` is explicitly selected.
+
+### Source-window policy
+
+The default `source_window_policy` is `target-overlap`.
+
+This means source samples are mapped only when their predicted target time falls inside the target timeline coverage, optionally expanded by `source_margin_ms`. Use `--source-window-policy all` to generate mappings for all source samples, including those outside the target run.
 
 ## Run tests
 

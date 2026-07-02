@@ -39,9 +39,13 @@ The v0.1 nearest mapping is an anchor-placement aid. It is intended to give the
 future GUI or notebook workflow a default target frame to jump to when browsing
 from RGB to radar.
 
-For this mapping method, `is_primary=True` means “default navigation candidate”,
-not “trusted synchronised correspondence”. Rows with `support_status=weak_support`
-may still be primary if they are the nearest available candidate.
+For this mapping method, `is_primary=True` means “selected default navigation candidate under the configured primary policy”, not “trusted final synchronised correspondence”.
+
+The default v0.1 `primary_policy` is `supported-only`, so weakly supported rows are kept as candidates but are not marked primary. Less conservative policies such as `within-max-delta` or `nearest-any` can be selected explicitly.
 
 Final or anchor-derived mappings must be generated as separate `MAPPING_VERSION`
 rows from an anchor-based `SYNC_MODEL`.
+
+## Mapping overwrite policy
+
+`map-nearest` and `map-nearest-all` refuse to reuse an existing `mapping_version_id` by default. If `--overwrite` is passed, existing `SAMPLE_MAPPING` rows for that mapping version are deleted before regenerated rows are inserted.

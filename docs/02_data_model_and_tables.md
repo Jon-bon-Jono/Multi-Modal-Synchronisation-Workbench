@@ -318,6 +318,7 @@ This is the **within-run** timing layer.
 - `linear_from_index`
 - `start_end_uniform`
 - `regressed_observed_vs_index`
+- `regressed_from_pts`
 - `piecewise`
 - `spline`
 - `manual`
@@ -343,13 +344,16 @@ This table is important because it prevents raw timestamps and modelled timestam
 | `device_type` | string | yes | FK to `DEVICE_RUN` |
 | `timeline_model_id` | string | yes | FK to `RUN_TIMELINE_MODEL` |
 | `sample_index` | int | yes | FK to `RUN_SAMPLE` |
-| `time_value` | datetime | yes | Assigned time under this model |
+| `time_value_datetime` | datetime string | no | Assigned datetime-like time under this model |
+| `time_value_sec` | float | no | Assigned numeric time in seconds under this model |
 | `time_kind` | string | yes | What kind of time this is |
-| `reference_time` | datetime | no | Optional reference origin or anchor time |
+| `reference_time_datetime` | datetime string | no | Optional datetime reference origin |
 | `residual_ms` | float | no | Residual or timing error diagnostic |
 | `notes` | string | no | Free-text notes |
 
-**Logical key:** (`subject_id`, `run_id`, `device_run`, `timeline_model_id`, `sample_index`)
+**Logical key:** (`subject_id`, `run_id`, `device_type`, `timeline_model_id`, `sample_index`)
+
+**v0.1 implementation note:** the implementation uses separate `time_value_datetime` and `time_value_sec` columns rather than one generic `time_value` column. This avoids representing relative times such as PTS or Kinect elapsed seconds as fake datetimes. At least one of `time_value_datetime` or `time_value_sec` should be populated for a useful time estimate.
 
 **Recommended controlled values for `time_kind`:** 
 
@@ -448,12 +452,15 @@ This is the **between-run** timing layer.
 
 **Recommended controlled values for `model_type`:**
 
+- `identity_time`
 - `piecewise_affine`
 - `global_affine`
 - `piecewise_linear`
 - `spline`
 - `manual`
 - `other`
+
+**v0.1 implementation note:** crude nearest-time mappings are generated through an explicit `identity_time` sync model. This records that the selected source and target timelines are compared in the same coordinate system, usually wallclock-like datetime coordinates.
 
 **Recommended controlled values for `extrapolation_policy`:**
 
@@ -500,12 +507,16 @@ A mapping version is derived from some method and often based on a sync model, b
 | `created_at` | datetime | no | Creation timestamp |
 | `parent_mapping_version_id` | string | no | Parent mapping version if derived/refined |
 | `source_sync_model_id` | string | no | Sync model used as the basis |
+| `parameters_json` | string / json | no | Serialized mapping-generation parameters |
 | `notes` | string | no | Free-text notes |
 
 **Logical key:** (`subject_id`, `mapping_version_id`)
 
+**v0.1 implementation note:** nearest-time mapping stores parameters such as `top_k`, `weak_support_threshold_ms`, `max_allowed_delta_ms`, `source_window_policy`, `source_margin_ms`, `primary_policy`, selected source/target timeline model IDs, and `allow_numeric_identity` in `parameters_json`.
+
 **Recommended controlled values for `mapping_method`:**
 
+- `initial_nearest_for_anchoring`
 - `nearest_predicted_time`
 - `nearest_observed_wallclock`
 - `windowed_nearest`
@@ -552,10 +563,40 @@ Represents one candidate or selected mapping pair between one source sample and 
 - `weak_support`
 - `extrapolated`
 - `outside_run`
+- `missing_source_time`
 - `missing_target`
 - `manual_override`
 
 ---
+
+### 5.14 v0.1 nearest-time mapping policies
+
+The v0.1 backend includes an initial nearest-time mapping generator intended mainly for prealignment and anchor-placement support.
+
+The mapping generator:
+
+- requires selected source and target timeline models,
+- creates or reuses an explicit `identity_time` `SYNC_MODEL`,
+- creates a `MAPPING_VERSION`,
+- stores top-k candidate rows in `SAMPLE_MAPPING`,
+- records generation parameters in `MAPPING_VERSION.parameters_json`.
+
+The default source-window policy is `target-overlap`, meaning source samples are only mapped when their predicted target time lies inside the target timeline coverage, optionally expanded by `source_margin_ms`.
+
+The supported source-window policies are:
+
+- `target-overlap`
+- `all`
+
+The default primary-selection policy is `supported-only`, meaning only the rank-1 candidate with `support_status = supported` is marked as `is_primary = true`.
+
+The supported primary policies are:
+
+- `supported-only`
+- `within-max-delta`
+- `nearest-any`
+
+Reusing an existing `mapping_version_id` is rejected by default. Passing an explicit overwrite option deletes existing `SAMPLE_MAPPING` rows for that mapping version before writing the regenerated mapping.
 
 ## 6. Relationship summary
 
