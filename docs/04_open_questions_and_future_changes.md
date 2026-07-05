@@ -384,9 +384,9 @@ These are plausible future extensions, not current requirements.
 
 The most useful near-term decisions after v0.1 are:
 
-1. settle the artifact/payload storage format for pose arrays, activity dictionaries, and radar point-cloud arrays,
-2. decide whether to add extra `SAMPLE_ARTIFACT` fields such as `artifact_member_key`, `artifact_format`, `payload_shape`, and `payload_dtype`,
-3. decide how much sample-level scalar payload summary should live in canonical tables versus derived summary artifacts,
+1. v0.2.1 settled the first artifact/payload storage format: run-level ragged NPZ bundles for arrays and indexed JSONL for activity dictionaries,
+2. v0.2.1 added extra `SAMPLE_ARTIFACT` fields including `artifact_id`, `artifact_member_key`, `artifact_format`, `payload_shape`, `payload_dtype`, `payload_bytes`, and `created_at`,
+3. v0.2.1 added a compact `SAMPLE_SUMMARY` table for scalar preview/filter fields,
 4. define the first manual-anchor import/export format,
 5. decide whether to add an `ANCHOR_SESSION` table before implementing the sandbox anchoring GUI,
 6. implement and test the piecewise affine feasibility sandbox before promoting it to a core workflow.

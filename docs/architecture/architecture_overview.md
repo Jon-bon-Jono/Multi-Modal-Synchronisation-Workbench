@@ -1,4 +1,4 @@
-# v0.1 architecture overview
+# v0.2.1 architecture overview
 
 ```mermaid
 flowchart LR
@@ -6,19 +6,24 @@ flowchart LR
     Services --> Core[Core schemas, enums, IDs, validation]
     Services --> Storage[CoreStore interface]
     Services --> Assets[Asset resolver]
+    Services --> Artifacts[Artifact store]
     Storage --> SQLite[(SQLite canonical store)]
     Storage --> Export[Parquet/CSV export]
+    Artifacts --> Bundles[NPZ / JSONL payload bundles]
     Assets --> Roots[User-local roots config]
 ```
 
 The backend has no GUI dependency. A future Qt GUI should call the service layer
 rather than directly reading pandas dataframes or SQLite tables.
 
-## Main v0.1 services
+## Main services
 
 - `IngestionService`: reads the temporary package and writes the canonical store.
-- `MappingService`: generates initial nearest-time mappings using selected
-  source and target timelines.
+- `MappingService`: generates initial nearest-time mappings using selected source and target timelines.
+- `ArtifactBuildService`: builds run-level payload bundles and writes artifact metadata.
+- `PayloadService`: retrieves sample payloads by canonical sample identity.
+- `PairInspectionService`: retrieves mapped-pair metadata, summaries, payload roles, and payload shapes.
+- `ArtifactAuditService`: checks artifact file/metadata consistency.
 
 ## Mapping provenance
 

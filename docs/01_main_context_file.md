@@ -717,7 +717,7 @@ The v0.1 backend now implements a narrow but working first slice of the workbenc
 - versioned `MAPPING_VERSION` and `SAMPLE_MAPPING` rows,
 - conservative primary-mapping selection by default.
 
-This does not yet implement artifact payload storage, manual anchors, piecewise affine synchronisation, or a GUI.
+v0.2.1 adds artifact payload storage and service-based payload access for RGB pose/activity payloads and radar point-cloud payloads. Manual anchors, piecewise affine synchronisation, and a GUI are still not implemented.
 
 ---
 
@@ -728,3 +728,18 @@ In one paragraph:
 The Multi-Modal Synchronisation Workbench is a post hoc synchronisation framework for multimodal recordings captured on different devices and host systems with imperfect and heterogeneous timestamps. Its core design is to separate manual anchor correspondences, run-specific timeline estimation, cross-modal synchronisation models, and generated mapping outputs, while keeping provenance and uncertainty explicit. The project also treats asset storage as flexible and relocatable by using portable references plus modality-aware configurable roots rather than brittle absolute paths. The workbench is therefore not just a formula for matching frames; it is a structured system for representing uncertain time, human correspondence decisions, modelled timelines, and reproducible cross-modal mappings.
 
 ---
+
+
+### 17.2 Current v0.2.1 implementation status
+
+The v0.2.1 backend adds a narrow artifact and payload access layer on top of v0.1:
+
+- run-level ragged NPZ bundles for RGB `pose2d`, RGB `conf2d`, RGB `pose3d`, and radar `points`,
+- indexed JSONL bundles for RGB `activity`,
+- extended `SAMPLE_ARTIFACT` metadata rows pointing from samples to bundle members,
+- `SAMPLE_SUMMARY` rows containing scalar preview/filter fields,
+- service-layer payload retrieval through `PayloadService`,
+- mapped-pair payload inspection through `PairInspectionService`,
+- CLI commands `build-artifacts`, `audit-artifacts`, and `inspect-pair`.
+
+The v0.2.1 implementation deliberately does not make the experimental GUI read artifact files directly. The intended GUI boundary is the service layer.

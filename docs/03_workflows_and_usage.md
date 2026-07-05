@@ -46,10 +46,11 @@ For each subject or recording unit, the normal order is:
 4. ingest canonical sample rows,
 5. ingest raw or observed timing signals,
 6. build one or more run timeline models,
-7. place anchors across runs,
-8. fit a sync model for a chosen source–target pair,
-9. generate a mapping version,
-10. inspect diagnostics and iterate if needed.
+7. build payload artifacts and scalar sample summaries,
+8. place anchors across runs,
+9. fit a sync model for a chosen source–target pair,
+10. generate a mapping version,
+11. inspect diagnostics and iterate if needed.
 
 Do not start by forcing everything into one shared timestamp column. That removes information too early.
 
@@ -185,6 +186,27 @@ Put large per-sample objects in artifacts, for example:
 Reference those through `SAMPLE_ARTIFACT` or run-level assets.
 
 ---
+
+## 7.3 v0.2.1 payload artifact build
+
+After canonical ingestion, build payload artifacts from the temporary ingestion package:
+
+```bash
+syncwb build-artifacts \
+  --input-temp path/to/temp_ingestion_folder \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store
+```
+
+This step writes run-level bundles for RGB `pose2d`, `conf2d`, `pose3d`, `activity`, and radar `points`. It then writes or updates:
+
+- `RUN_ASSET` rows for the bundle files,
+- `SAMPLE_ARTIFACT` rows linking samples to bundle members,
+- `SAMPLE_SUMMARY` rows with compact scalar preview fields.
+
+The GUI and other consumers should access payloads through services such as `PayloadService` and `PairInspectionService`, not by reading temporary `.zst` files or bundle internals directly.
+
+By default, artifact refs are grouped as `subjects/<subject_id>/<device_type>/<run_id>/<filename>`, so modality/device type is above the run/session identifier.
 
 ## 8. Workflow E — Ingest timing evidence
 
@@ -371,6 +393,21 @@ By default, mappings are generated only for source samples whose predicted targe
 By default, `is_primary = true` is assigned only to the rank-1 candidate when `support_status = supported`. Weakly supported candidates remain available as candidate rows but are not primary unless a less conservative primary policy is explicitly selected.
 
 ---
+
+## 12.3 Inspect mapped pair payloads
+
+After a mapping version and artifacts exist, inspect one mapped source-target pair with:
+
+```bash
+syncwb inspect-pair \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store \
+  --subject P001 \
+  --mapping-version rgb_to_pc_initial_v001 \
+  --source-sample 123
+```
+
+This reports the selected source and target samples, timing residual/support metadata, scalar summaries, available payload roles, and payload shapes. This command is mainly a backend smoke test for the future GUI service boundary.
 
 ## 13. Workflow J — Inspect diagnostics
 

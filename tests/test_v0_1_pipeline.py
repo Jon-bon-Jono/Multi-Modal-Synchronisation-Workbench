@@ -167,6 +167,7 @@ def test_ingest_and_map(tmp_path: Path):
         target_timeline="radar_pc_linear_from_index",
         mapping_version_prefix="batch_rgb_to_pc_v001",
         top_k=1,
+        min_overlap_sec=0.0,
     )
 
     assert not batch.pair_report.empty

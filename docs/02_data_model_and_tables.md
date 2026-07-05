@@ -273,7 +273,15 @@ Typical examples:
 | `device_type` | string | yes | FK to `DEVICE_RUN` |
 | `sample_index` | int | yes | FK to `RUN_SAMPLE` |
 | `artifact_role` | string | yes | Role of this sample artifact |
-| `artifact_ref` | string | yes | Portable reference to the artifact |
+| `artifact_id` | string | no | ID of the owning run-level artifact bundle, usually also present in `RUN_ASSET` |
+| `storage_key` | string | no | Logical storage namespace / root group |
+| `artifact_ref` | string | yes | Portable reference to the artifact bundle or file |
+| `artifact_member_key` | string / json | no | Member locator inside the artifact, such as sample index or JSONL byte offset |
+| `artifact_format` | string | no | Physical artifact format, such as `ragged_npz` or `jsonl` |
+| `payload_shape` | string / json | no | Per-sample payload shape |
+| `payload_dtype` | string | no | Payload dtype or logical type |
+| `payload_bytes` | int | no | Approximate per-sample payload byte count |
+| `created_at` | datetime | no | Creation timestamp |
 | `notes` | string | no | Free-text notes |
 
 **Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`, `artifact_role`)
@@ -281,15 +289,46 @@ Typical examples:
 **Recommended controlled values for `artifact_role`:**
 
 - `preview_image`
-- `pose2d_json`
-- `pose3d_json`
+- `pose2d`
+- `conf2d`
+- `pose3d`
+- `activity`
+- `radar_points`
 - `pc_frame_file`
 - `raw_frame_file`
-- `activity_json`
 - `diagnostic_plot`
 - `other`
 
+**v0.2.1 implementation note:** RGB pose/activity payloads and radar point-cloud payloads are stored in run-level artifact bundles. `SAMPLE_ARTIFACT` rows identify the relevant bundle and member for each sample.
+
 ---
+
+## 5.6 `SAMPLE_SUMMARY`
+
+Represents compact scalar per-sample fields useful for filtering, previews, and GUI navigation. This table is derived from payload metadata and should not contain large arrays.
+
+| Column | Type | Required | Meaning |
+|---|---|---:|---|
+| `subject_id` | string | yes | FK to `SUBJECT` |
+| `run_id` | string | yes | FK to `DEVICE_RUN` |
+| `device_type` | string | yes | FK to `DEVICE_RUN` |
+| `sample_index` | int | yes | FK to `RUN_SAMPLE` |
+| `num_people` | int | no | Human/person count when available |
+| `num_2d` | int | no | Number of 2D pose detections |
+| `num_3d` | int | no | Number of 3D pose detections |
+| `point_count` | int | no | Number of radar point-cloud points |
+| `point_count_filtered` | int | no | Number of radar points after filtering |
+| `has_pose2d` | bool | no | Whether a non-empty 2D pose payload is present |
+| `has_conf2d` | bool | no | Whether a non-empty 2D confidence payload is present |
+| `has_pose3d` | bool | no | Whether a non-empty 3D pose payload is present |
+| `has_activity` | bool | no | Whether an activity payload exists |
+| `has_points` | bool | no | Whether a non-empty point-cloud payload is present |
+| `created_at` | datetime | no | Creation timestamp |
+| `notes` | string | no | Free-text notes |
+
+**Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`)
+
+**v0.2.1 implementation note:** this is a convenience table for preview/filter workflows. Rich payloads remain in artifacts.
 
 ## 5.6 `RUN_TIMELINE_MODEL`
 
@@ -606,6 +645,7 @@ The core intended relationships are:
 - one `DEVICE_RUN` has many `RUN_SAMPLE`s,
 - one `DEVICE_RUN` has many `RUN_ASSET`s,
 - one `RUN_SAMPLE` can have many `SAMPLE_ARTIFACT`s,
+- one `RUN_SAMPLE` can have one `SAMPLE_SUMMARY` row,
 - one `RUN_TIMELINE_MODEL` assigns many `SAMPLE_TIME_ESTIMATE`s,
 - one `ANCHOR` has many `ANCHOR_MEMBER`s,
 - one `SYNC_MODEL` may use many anchors through `MODEL_ANCHOR`,

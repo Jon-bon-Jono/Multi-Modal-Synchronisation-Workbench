@@ -6,6 +6,7 @@ __pycache__/
 reports/
 canonical_export/
 versions/
+artifact_store/
 
 # Database
 *.sqlite

@@ -10,6 +10,7 @@ erDiagram
     DEVICE_RUN ||--o{ RUN_TIMELINE_MODEL : has
 
     RUN_SAMPLE ||--o{ SAMPLE_ARTIFACT : has
+    RUN_SAMPLE ||--o| SAMPLE_SUMMARY : summarized_by
     RUN_SAMPLE ||--o{ SAMPLE_TIME_ESTIMATE : has_time_estimate
     RUN_SAMPLE ||--o{ ANCHOR_MEMBER : participates_in
     RUN_SAMPLE ||--o{ SAMPLE_MAPPING : source_sample
@@ -73,7 +74,34 @@ erDiagram
         string device_type PK, FK
         int sample_index PK, FK
         string artifact_role PK
+        string artifact_id
+        string storage_key
         string artifact_ref
+        string artifact_member_key
+        string artifact_format
+        string payload_shape
+        string payload_dtype
+        int payload_bytes
+        datetime created_at
+        string notes
+    }
+
+    SAMPLE_SUMMARY {
+        string subject_id PK, FK
+        string run_id PK, FK
+        string device_type PK, FK
+        int sample_index PK, FK
+        int num_people
+        int num_2d
+        int num_3d
+        int point_count
+        int point_count_filtered
+        bool has_pose2d
+        bool has_conf2d
+        bool has_pose3d
+        bool has_activity
+        bool has_points
+        datetime created_at
         string notes
     }
 

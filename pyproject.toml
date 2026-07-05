@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sync-workbench"
-version = "0.1.0"
-description = "Backend-first v0.1 for the Multi-modal Synchronisation Workbench"
+version = "0.2.1"
+description = "Backend-first v0.2.1 for the Multi-modal Synchronisation Workbench"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

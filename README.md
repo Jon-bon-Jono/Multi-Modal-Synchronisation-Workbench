@@ -1,13 +1,10 @@
-# Multi-modal Synchronisation Workbench v0.1
+# Multi-modal Synchronisation Workbench v0.2.1
 
-Backend-first initial implementation of the Multi-modal Synchronisation Workbench.
+Backend-first implementation of the Multi-modal Synchronisation Workbench.
 
-v0.1 is intentionally narrow. It turns the temporary ingestion package into a
-canonical local workbench store, builds initial timeline models, and generates
-crude RGB-to-radar nearest-time mappings through a recorded `identity_time`
-`SYNC_MODEL`.
+v0.2.1 keeps the v0.1 canonical ingestion and nearest-time mapping baseline, then adds an artifact and payload access layer for RGB pose/activity payloads and radar point-cloud payloads. The GUI-facing boundary is now service-based: frontends should call payload/pair-inspection services rather than reading temporary `.zst` files or artifact bundle internals directly.
 
-## What v0.1 does
+## What the backend does
 
 - Reads temporary ingestion files:
   - `device_runs.zst`
@@ -18,6 +15,8 @@ crude RGB-to-radar nearest-time mappings through a recorded `identity_time`
   - `DEVICE_RUN`
   - `RUN_SAMPLE`
   - `RUN_ASSET`
+  - `SAMPLE_ARTIFACT`
+  - `SAMPLE_SUMMARY`
   - `RUN_TIMELINE_MODEL`
   - `SAMPLE_TIME_ESTIMATE`
   - plus empty anchor/sync/mapping tables as needed
@@ -33,6 +32,8 @@ crude RGB-to-radar nearest-time mappings through a recorded `identity_time`
 - Generates nearest-time RGB-to-radar mappings with top-k candidates.
 - Stores mapping provenance through `SYNC_MODEL -> MAPPING_VERSION -> SAMPLE_MAPPING`.
 - Exports reports and optional Parquet/CSV canonical tables.
+- Builds run-level artifact bundles for `pose2d`, `conf2d`, `pose3d`, `activity`, and radar `points`.
+- Provides services and CLI commands for payload retrieval, artifact auditing, and mapped-pair inspection.
 
 ## Install for development
 
@@ -67,6 +68,64 @@ syncwb ingest-temp \
 ```bash
 syncwb summary --sqlite workbench.sqlite
 ```
+
+## Build v0.2.1 payload artifacts
+
+Run this after `ingest-temp`. It reads payload columns from the temporary ingestion package, writes run-level artifact bundles, and upserts `RUN_ASSET`, `SAMPLE_ARTIFACT`, and `SAMPLE_SUMMARY` metadata into the SQLite store.
+
+```bash
+syncwb build-artifacts \
+  --input-temp path/to/temp_ingestion_folder \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store \
+  --overwrite
+```
+
+The default artifact layout is:
+
+```text
+artifact_store/
+  subjects/
+    <subject_id>/
+      kinect_rgb/
+        <run_id>/
+          pose2d.npz
+          conf2d.npz
+          pose3d.npz
+          activity.jsonl
+          sample_payload_manifest.parquet  # or .csv fallback when pyarrow is unavailable
+      radar_pc/
+        <run_id>/
+          points.npz
+          sample_payload_manifest.parquet  # or .csv fallback when pyarrow is unavailable
+```
+
+The `.npz` files use a ragged bundle layout with `sample_index`, `offsets`, and concatenated `values`. This avoids one file per frame and keeps payloads outside the canonical core tables.
+
+## Audit payload artifacts
+
+```bash
+syncwb audit-artifacts \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store \
+  --issues-csv reports/artifact_audit.csv
+```
+
+The audit checks artifact file existence, ragged NPZ offset consistency, JSONL member readability, and basic `SAMPLE_ARTIFACT`/`SAMPLE_SUMMARY` consistency.
+
+## Inspect a mapped pair and available payloads
+
+```bash
+syncwb inspect-pair \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store \
+  --subject P001 \
+  --mapping-version rgb_to_pc_initial_v001 \
+  --source-sample 123 \
+  --json
+```
+
+This uses `SAMPLE_MAPPING` to find the target candidate and reports source/target summaries plus available payload roles and shapes. It is the service/CLI path the experimental GUI should build on.
 
 ## Generate an initial RGB-to-radar mapping for one source/target run pair
 
@@ -116,7 +175,7 @@ syncwb map-nearest-all \
 This command searches for source-target run pairs from the same subject whose selected timelines overlap by at least `--min-overlap-sec`, generates deterministic mapping version IDs using the prefix, and writes a pair report.
 
 
-## Important v0.1 design choices
+## Important design choices
 
 ### Option A for mapping provenance
 
@@ -133,9 +192,7 @@ residuals where observed values exist.
 
 ### Large arrays stay out of the canonical core
 
-Pose arrays, activity dictionaries, and point arrays are not embedded in the
-canonical core tables. v0.1 preserves scalar metadata and timing structure. Large
-payload artifact export can be added later.
+Pose arrays, activity dictionaries, and point arrays are not embedded directly in the canonical core tables. v0.2.1 writes them to run-level artifact bundles and references those bundles from `SAMPLE_ARTIFACT`. Scalar preview/filter fields live in `SAMPLE_SUMMARY`.
 
 ### Datetime and numeric time values are stored separately
 

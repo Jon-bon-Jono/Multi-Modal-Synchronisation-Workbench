@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
+from sync_workbench.services.artifact_audit_service import ArtifactAuditService
+from sync_workbench.services.artifact_build_service import ArtifactBuildService
 from sync_workbench.services.ingestion_service import IngestionService
 from sync_workbench.services.mapping_service import MappingService
+from sync_workbench.services.pair_inspection_service import PairInspectionService
 from sync_workbench.storage.sqlite_store import SQLiteCoreStore
 from sync_workbench.sync.mapping import TimelineSelection
 
@@ -22,6 +26,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     summary = sub.add_parser("summary", help="Print row counts for a canonical SQLite store")
     summary.add_argument("--sqlite", required=True, help="SQLite store path")
+
+    build_artifacts = sub.add_parser("build-artifacts", help="Build v0.2.1 artifact bundles from temporary payload columns")
+    build_artifacts.add_argument("--input-temp", required=True, help="Folder containing temporary ingestion .zst files")
+    build_artifacts.add_argument("--sqlite", required=True, help="Canonical SQLite store path created by ingest-temp")
+    build_artifacts.add_argument("--artifact-root", required=True, help="Artifact store root directory")
+    build_artifacts.add_argument("--subject", default=None, help="Optional subject_id filter")
+    build_artifacts.add_argument("--devices", nargs="+", choices=["kinect_rgb", "radar_pc"], default=None)
+    build_artifacts.add_argument("--overwrite", action="store_true", help="Replace existing artifact bundle files and metadata rows")
+
+    audit_artifacts = sub.add_parser("audit-artifacts", help="Audit v0.2.1 artifact metadata and bundle files")
+    audit_artifacts.add_argument("--sqlite", required=True, help="Canonical SQLite store path")
+    audit_artifacts.add_argument("--artifact-root", required=True, help="Artifact store root directory")
+    audit_artifacts.add_argument("--issues-csv", default=None, help="Optional CSV path for audit issues")
+
+    inspect_pair = sub.add_parser("inspect-pair", help="Inspect one mapped source-target pair and its available payloads")
+    inspect_pair.add_argument("--sqlite", required=True, help="Canonical SQLite store path")
+    inspect_pair.add_argument("--artifact-root", required=True, help="Artifact store root directory")
+    inspect_pair.add_argument("--subject", default=None, help="Subject id. Required if mapping-version is not globally unique.")
+    inspect_pair.add_argument("--mapping-version", required=True)
+    inspect_pair.add_argument("--source-sample", required=True, type=int)
+    inspect_pair.add_argument("--include-secondary", action="store_true", help="Allow a non-primary/secondary candidate if it sorts first by rank")
+    inspect_pair.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     mapn = sub.add_parser("map-nearest", help="Generate a crude nearest-time mapping intended for anchor-placement/navigation")
     mapn.add_argument("--sqlite", required=True, help="SQLite store path")
@@ -124,6 +150,60 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{name:<{width}}  {count}")
         return 0
 
+
+    if args.command == "build-artifacts":
+        try:
+            result = ArtifactBuildService().build_from_temp_package(
+                args.input_temp,
+                args.sqlite,
+                args.artifact_root,
+                overwrite=args.overwrite,
+                subject_id=args.subject,
+                devices=args.devices,
+            )
+        except (ValueError, FileExistsError, FileNotFoundError) as exc:
+            print(f"Error: {exc}")
+            return 2
+        print("Artifact build complete.")
+        print(result.reports["table_counts"].to_string(index=False))
+        if not result.reports["artifact_build_summary"].empty:
+            print(result.reports["artifact_build_summary"].to_string(index=False))
+        return 0
+
+    if args.command == "audit-artifacts":
+        issues = ArtifactAuditService(args.sqlite, args.artifact_root).audit()
+        if args.issues_csv:
+            Path(args.issues_csv).parent.mkdir(parents=True, exist_ok=True)
+            issues.to_csv(args.issues_csv, index=False)
+        if issues.empty:
+            print("Artifact audit passed: no issues found.")
+            return 0
+        print(issues.to_string(index=False))
+        return 1 if "error" in set(issues["severity"].astype(str)) else 0
+
+    if args.command == "inspect-pair":
+        try:
+            result = PairInspectionService(args.sqlite, args.artifact_root).inspect_pair(
+                args.mapping_version,
+                args.source_sample,
+                subject_id=args.subject,
+                primary_only=not args.include_secondary,
+            )
+        except (KeyError, ValueError, FileNotFoundError) as exc:
+            print(f"Error: {exc}")
+            return 2
+        if args.json:
+            print(json.dumps(_json_safe(result), indent=2, sort_keys=True))
+        else:
+            print("Mapping:")
+            for key, value in result["mapping"].items():
+                print(f"  {key}: {value}")
+            print("Source:")
+            _print_endpoint(result["source"], result["payload_shapes"]["source"])
+            print("Target:")
+            _print_endpoint(result["target"], result["payload_shapes"]["target"])
+        return 0
+
     if args.command == "map-nearest":
         service = MappingService(args.sqlite)
         source = TimelineSelection(args.subject, args.source_run, args.source_device, args.source_timeline)
@@ -186,6 +266,38 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raise AssertionError(f"Unhandled command {args.command}")
+
+
+def _print_endpoint(endpoint: dict, payload_shapes: dict) -> None:
+    print(f"  {endpoint['subject_id']} / {endpoint['run_id']} / {endpoint['device_type']} / sample {endpoint['sample_index']}")
+    print(f"  payload_roles: {', '.join(endpoint.get('payload_roles', [])) or '(none)'}")
+    if endpoint.get("summary"):
+        print("  summary:")
+        for key, value in endpoint["summary"].items():
+            if key in {"subject_id", "run_id", "device_type", "sample_index", "notes"}:
+                continue
+            print(f"    {key}: {value}")
+    if payload_shapes:
+        print("  payload_shapes:")
+        for role, desc in payload_shapes.items():
+            print(f"    {role}: {desc}")
+
+
+def _json_safe(value):
+    try:
+        import numpy as np
+    except Exception:  # pragma: no cover
+        np = None
+    if np is not None:
+        if isinstance(value, np.ndarray):
+            return {"type": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
+        if isinstance(value, np.generic):
+            return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 if __name__ == "__main__":
     raise SystemExit(main())
