@@ -1,4 +1,4 @@
-# v0.2.1 architecture overview
+# v0.2.2 architecture overview
 
 ```mermaid
 flowchart LR
@@ -24,6 +24,11 @@ rather than directly reading pandas dataframes or SQLite tables.
 - `PayloadService`: retrieves sample payloads by canonical sample identity.
 - `PairInspectionService`: retrieves mapped-pair metadata, summaries, payload roles, and payload shapes.
 - `ArtifactAuditService`: checks artifact file/metadata consistency.
+- `AnchorService`: creates, lists, deletes, exports, and imports canonical anchors.
+- `AssetService`: resolves `RUN_ASSET` rows against simple local roots.
+- `VideoFrameService`: retrieves RGB MP4 frames by canonical sample index.
+- `MappingLookupService`: supports source-target navigation for GUI sync controls.
+- `PiecewiseSyncService`: fits official piecewise-affine sync models and generates revised mapping versions.
 
 ## Mapping provenance
 
@@ -54,3 +59,17 @@ rows from an anchor-based `SYNC_MODEL`.
 ## Mapping overwrite policy
 
 `map-nearest` and `map-nearest-all` refuse to reuse an existing `mapping_version_id` by default. If `--overwrite` is passed, existing `SAMPLE_MAPPING` rows for that mapping version are deleted before regenerated rows are inserted.
+
+## v0.2.2 piecewise workflow
+
+```mermaid
+flowchart TD
+    A[ANCHOR + ANCHOR_MEMBER rows] --> P[PiecewiseSyncService]
+    P --> ALG[sync/piecewise_affine.py]
+    ALG --> S[SYNC_MODEL: piecewise_affine]
+    S --> MA[MODEL_ANCHOR rows]
+    S --> MV[MAPPING_VERSION]
+    MV --> SM[SAMPLE_MAPPING rows]
+```
+
+The piecewise-affine algorithm is official backend code. The synthetic probes and anchoring GUI are experimental clients of the service layer.

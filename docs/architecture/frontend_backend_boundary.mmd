@@ -1,24 +1,45 @@
 flowchart LR
-    subgraph Future Frontend
-        GUI[Qt GUI]
+    subgraph Experimental_Frontend
+        GUI[Experimental Qt anchoring GUI]
         CLI[CLI]
         NB[Notebook]
     end
 
-    subgraph Backend
-        SERVICES[Application services]
-        DOMAIN[Core domain tables and model classes]
-        STORAGE[CoreStore]
-        ASSETS[AssetResolver]
+    subgraph Services
+        PAYLOAD[PayloadService]
+        PAIR[PairInspectionService]
+        ANCHOR[AnchorService]
+        LOOKUP[MappingLookupService]
+        PIECEWISE[PiecewiseSyncService]
+        VIDEO[VideoFrameService]
+        ASSET[AssetService]
     end
 
-    GUI --> SERVICES
-    CLI --> SERVICES
-    NB --> SERVICES
-    SERVICES --> DOMAIN
-    SERVICES --> STORAGE
-    SERVICES --> ASSETS
+    subgraph Official_Backend
+        ALG[piecewise_affine.py]
+        TABLES[Core table specs]
+        STORAGE[SQLiteCoreStore]
+        ARTIFACTS[ArtifactStore]
+    end
+
+    GUI --> PAYLOAD
+    GUI --> ANCHOR
+    GUI --> LOOKUP
+    GUI --> VIDEO
+    CLI --> PIECEWISE
+    CLI --> ANCHOR
+    CLI --> PAYLOAD
+    NB --> Services
+
+    VIDEO --> ASSET
+    PAYLOAD --> ARTIFACTS
+    PIECEWISE --> ALG
+    PIECEWISE --> STORAGE
+    ANCHOR --> STORAGE
+    LOOKUP --> STORAGE
+    ASSET --> STORAGE
+    STORAGE --> TABLES
 
     STORAGE --> SQLITE[(SQLite)]
-    STORAGE --> PARQUET[Parquet/CSV]
-    ASSETS --> ROOTS[Local roots YAML]
+    ARTIFACTS --> BUNDLES[NPZ / JSONL artifacts]
+    ASSET --> ROOTS[Local roots]

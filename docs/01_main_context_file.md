@@ -743,3 +743,17 @@ The v0.2.1 backend adds a narrow artifact and payload access layer on top of v0.
 - CLI commands `build-artifacts`, `audit-artifacts`, and `inspect-pair`.
 
 The v0.2.1 implementation deliberately does not make the experimental GUI read artifact files directly. The intended GUI boundary is the service layer.
+
+### 17.3 Current v0.2.2 implementation status
+
+The v0.2.2 backend adds the first anchor-driven synchronisation feasibility layer on top of v0.2.1:
+
+- `AnchorService` creates, deletes, lists, exports, and imports canonical `ANCHOR` / `ANCHOR_MEMBER` rows.
+- `sync_workbench.sync.piecewise_affine` provides the official pure piecewise-affine algorithm implementation.
+- `PiecewiseSyncService` fits a `piecewise_affine` `SYNC_MODEL` from canonical anchors, writes `MODEL_ANCHOR` provenance rows, and generates a revised `MAPPING_VERSION` / `SAMPLE_MAPPING` output.
+- `MappingLookupService` supports source-to-target and approximate target-to-source navigation over a mapping version.
+- `AssetService` and `VideoFrameService` provide simple service-layer access to run-level RGB MP4 assets registered in `RUN_ASSET`.
+- `experimental.feasibility` contains synthetic timeline cases and reports for probing piecewise-affine behaviour before applying it to real anchors.
+- `experimental.anchoring_gui` contains a deliberately minimal GUI client for one subject and one mapping pair at a time.
+
+The v0.2.2 GUI remains experimental. The official reusable pieces are the services and the `sync/piecewise_affine.py` algorithm code. The GUI must call services rather than reading temporary `.zst` files, artifact bundles, or SQLite tables directly.

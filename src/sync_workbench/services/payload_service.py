@@ -23,6 +23,7 @@ class PayloadService:
         self.artifact_store = ArtifactStore(artifact_root)
         self._npz_cache: dict[Path, RaggedNpzReader] = {}
         self._jsonl_cache: dict[Path, IndexedJsonlReader] = {}
+        self._sample_artifacts_cache: pd.DataFrame | None = None
 
     def get_sample_artifact_rows(
         self,
@@ -31,7 +32,9 @@ class PayloadService:
         device_type: str,
         sample_index: int,
     ) -> pd.DataFrame:
-        artifacts = self.store.read_table("SAMPLE_ARTIFACT")
+        if self._sample_artifacts_cache is None:
+            self._sample_artifacts_cache = self.store.read_table("SAMPLE_ARTIFACT")
+        artifacts = self._sample_artifacts_cache
         if artifacts.empty:
             return artifacts
         mask = (

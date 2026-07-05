@@ -390,3 +390,27 @@ The most useful near-term decisions after v0.1 are:
 4. define the first manual-anchor import/export format,
 5. decide whether to add an `ANCHOR_SESSION` table before implementing the sandbox anchoring GUI,
 6. implement and test the piecewise affine feasibility sandbox before promoting it to a core workflow.
+
+## 9. v0.2.2 decisions now made
+
+The following decisions have been made for v0.2.2:
+
+- implement the piecewise-affine algorithm as official backend code in `sync_workbench/sync/piecewise_affine.py`,
+- keep the GUI and synthetic reports under `sync_workbench/experimental`,
+- use canonical `ANCHOR` and `ANCHOR_MEMBER` rows for GUI-created anchors,
+- defer a canonical `ANCHOR_SESSION` table and instead use JSON provenance in notes / export sidecars for now,
+- keep RGB MP4 video as a run-level `RUN_ASSET`, not as a v0.2.1 artifact bundle,
+- resolve RGB video using a simple local `rgb_root / asset_ref` rule,
+- seek video frames by canonical zero-based `sample_index`, not by raw `rgb_samples.frame_number`,
+- treat the first GUI as a one-subject, one-source-target-pair feasibility tool rather than the final production interface.
+
+## 10. Post-v0.2.2 questions
+
+The following should be revisited after using the experimental GUI on real subject packages:
+
+- whether an explicit `ANCHOR_SESSION` table is needed,
+- whether annotator identity, audit history, and conflict handling need first-class schema fields,
+- whether exact sample anchors are sufficient or interval/window anchors are needed,
+- whether target-to-source inverse lookup should become model-based rather than mapping-table based,
+- whether video frame access needs caching, thumbnails, or predecoded preview artifacts,
+- how much of the synthetic feasibility report format should be promoted into an official diagnostic workflow.

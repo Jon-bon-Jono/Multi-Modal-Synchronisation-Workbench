@@ -18,10 +18,21 @@ dependencies:
   # Development / testing
   - pytest>=7
 
+  # Plotting / feasibility reports
+  - matplotlib>=3.7
+
+  # GUI / video playback
+  - pyside6>=6.6
+  - pyqtgraph>=0.13
+  - opencv>=4.8
+  - pyopengl>=3.1
+
   # Notebook support
   - jupyterlab
   - notebook
   - ipykernel
   - ipywidgets
+
   - pip:
       - -e .
+

@@ -843,3 +843,18 @@ The schema should stay centred on a **normalised canonical core** that makes the
 The temporary zst files used during ingestion should map into this core cleanly.
 
 The existing ER diagram remains acceptable as the current compact relational view of this design.
+
+## 11. v0.2.2 implementation notes
+
+v0.2.2 does not add new canonical tables. It uses existing `ANCHOR`, `ANCHOR_MEMBER`, `MODEL_ANCHOR`, `SYNC_MODEL`, `MAPPING_VERSION`, and `SAMPLE_MAPPING` tables for the first anchor-driven synchronisation workflow.
+
+The new service-layer behaviour is:
+
+- `AnchorService` writes canonical anchors and anchor members.
+- `PiecewiseSyncService` fits a `SYNC_MODEL` with `model_type = piecewise_affine` from selected anchors.
+- `MODEL_ANCHOR` records which anchors the piecewise model used.
+- The revised sample correspondences are written as a new `MAPPING_VERSION` and `SAMPLE_MAPPING` rows.
+- `MappingLookupService` provides source-to-target and approximate target-to-source navigation for the experimental GUI.
+- RGB video files remain `RUN_ASSET` rows with `asset_role = rgb_video`; they are resolved by a local RGB root and are not stored in `SAMPLE_ARTIFACT`.
+
+For video playback, `RUN_SAMPLE.sample_index` is the canonical zero-based frame position used for seeking. The temporary `rgb_samples.frame_number` field may start at 1 and should not be used as the canonical video-frame seek index.

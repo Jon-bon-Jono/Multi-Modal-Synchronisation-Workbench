@@ -474,3 +474,63 @@ That way the same metadata can function across different machines and storage la
 
 ---
 
+
+## 16. v0.2.2 anchor-driven feasibility workflow
+
+The v0.2.2 workflow adds a practical path from crude nearest-time prealignment to manually anchored piecewise-affine synchronisation.
+
+Recommended order for a single source-target pair:
+
+1. ingest the temporary files with `ingest-temp`,
+2. build payload artifacts with `build-artifacts`,
+3. generate an initial nearest-time mapping with `map-nearest` or `map-nearest-all`,
+4. provide the annotator with a subject-scoped SQLite store, subject-specific artifact store, and RGB video root,
+5. launch the experimental GUI from one `subject_id` and one initial `mapping_version_id`,
+6. place anchors as canonical `ANCHOR` / `ANCHOR_MEMBER` rows,
+7. export anchors if working in a subject package,
+8. import anchors into the master workbench if needed,
+9. fit a piecewise-affine sync model with `fit-piecewise`,
+10. inspect the revised mapping and diagnostics.
+
+The GUI is not the owner of the data model. It is a client of `VideoFrameService`, `PayloadService`, `MappingLookupService`, and `AnchorService`.
+
+### 16.1 RGB video assets
+
+RGB MP4s are run-level assets, not v0.2.1 artifact bundles. They are registered in `RUN_ASSET` with `asset_role = rgb_video` and typically `storage_key = rgb`.
+
+For v0.2.2, the simple expected resolution rule is:
+
+```text
+resolved_video_path = rgb_root / RUN_ASSET.asset_ref
+```
+
+The video frame service seeks using canonical `RUN_SAMPLE.sample_index`. The raw `rgb_samples.frame_number` may start at 1, but GUI/video access should not use it as the frame seek index.
+
+### 16.2 Piecewise fitting CLI
+
+```bash
+syncwb fit-piecewise \
+  --sqlite workbench.sqlite \
+  --subject 19_MM \
+  --source-run "<rgb_run_id>" \
+  --source-device kinect_rgb \
+  --source-timeline rgb_wallclock_from_pts \
+  --target-run "<radar_run_id>" \
+  --target-device radar_pc \
+  --target-timeline radar_pc_linear_from_index \
+  --sync-model piecewise_rgb_to_pc_v001 \
+  --mapping-version piecewise_rgb_to_pc_v001_map \
+  --parent-mapping-version initial_rgb_to_pc_v001 \
+  --top-k 3 \
+  --extrapolation-policy disallow
+```
+
+This creates a real `SYNC_MODEL`, declares used anchors through `MODEL_ANCHOR`, and writes a new `MAPPING_VERSION` plus `SAMPLE_MAPPING` candidate rows.
+
+### 16.3 Synthetic feasibility reports
+
+```bash
+syncwb piecewise-synthetic-report --output reports/piecewise_synthetic
+```
+
+The synthetic sandbox is intentionally under `experimental/feasibility`. It validates and illustrates the official piecewise-affine implementation using controlled cases before real anchor sessions are used.

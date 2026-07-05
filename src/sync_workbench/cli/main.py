@@ -8,6 +8,9 @@ from pathlib import Path
 from sync_workbench.services.artifact_audit_service import ArtifactAuditService
 from sync_workbench.services.artifact_build_service import ArtifactBuildService
 from sync_workbench.services.ingestion_service import IngestionService
+from sync_workbench.services.anchor_service import AnchorEndpoint, AnchorService
+from sync_workbench.services.piecewise_sync_service import PiecewiseSyncService
+from sync_workbench.experimental.feasibility.reports import build_piecewise_synthetic_report
 from sync_workbench.services.mapping_service import MappingService
 from sync_workbench.services.pair_inspection_service import PairInspectionService
 from sync_workbench.storage.sqlite_store import SQLiteCoreStore
@@ -15,7 +18,7 @@ from sync_workbench.sync.mapping import TimelineSelection
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="syncwb", description="Multi-modal Synchronisation Workbench v0.1 backend CLI")
+    parser = argparse.ArgumentParser(prog="syncwb", description="Multi-modal Synchronisation Workbench backend CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     ingest = sub.add_parser("ingest-temp", help="Convert temporary zst ingestion files into a canonical SQLite store")
@@ -117,6 +120,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing mapping versions generated with the same deterministic IDs.",
     )
     mapall.add_argument("--pair-report-csv", default=None)
+
+
+    fit_piecewise = sub.add_parser("fit-piecewise", help="Fit a piecewise-affine sync model from canonical anchors and generate a mapping version")
+    fit_piecewise.add_argument("--sqlite", required=True, help="SQLite store path")
+    fit_piecewise.add_argument("--subject", required=True)
+    fit_piecewise.add_argument("--source-run", required=True)
+    fit_piecewise.add_argument("--source-device", default="kinect_rgb")
+    fit_piecewise.add_argument("--source-timeline", required=True)
+    fit_piecewise.add_argument("--target-run", required=True)
+    fit_piecewise.add_argument("--target-device", default="radar_pc")
+    fit_piecewise.add_argument("--target-timeline", required=True)
+    fit_piecewise.add_argument("--sync-model", required=True)
+    fit_piecewise.add_argument("--mapping-version", required=True)
+    fit_piecewise.add_argument("--parent-mapping-version", default="")
+    fit_piecewise.add_argument("--top-k", type=int, default=3)
+    fit_piecewise.add_argument("--weak-support-threshold-ms", type=float, default=75.0)
+    fit_piecewise.add_argument("--max-allowed-delta-ms", type=float, default=200.0)
+    fit_piecewise.add_argument("--extrapolation-policy", choices=["disallow", "allow-linear", "allow_linear"], default="disallow")
+    fit_piecewise.add_argument("--primary-policy", choices=["supported-only", "within-max-delta", "nearest-any"], default="supported-only")
+    fit_piecewise.add_argument("--overwrite", action="store_true")
+    fit_piecewise.add_argument("--allow-nonmonotonic-target", action="store_true", help="Allow target anchor times that are not strictly increasing")
+    fit_piecewise.add_argument("--diagnostics-csv", default=None)
+
+    export_anchors = sub.add_parser("export-anchors", help="Export pair anchors as JSON")
+    export_anchors.add_argument("--sqlite", required=True)
+    export_anchors.add_argument("--output", required=True)
+    export_anchors.add_argument("--subject", required=True)
+    export_anchors.add_argument("--source-run", required=True)
+    export_anchors.add_argument("--source-device", default="kinect_rgb")
+    export_anchors.add_argument("--target-run", required=True)
+    export_anchors.add_argument("--target-device", default="radar_pc")
+    export_anchors.add_argument("--annotator-id", default="")
+    export_anchors.add_argument("--initial-mapping-version", default="")
+
+    import_anchors = sub.add_parser("import-anchors", help="Import anchors from JSON")
+    import_anchors.add_argument("--sqlite", required=True)
+    import_anchors.add_argument("--input", required=True)
+    import_anchors.add_argument("--overwrite", action="store_true")
+
+    synthetic = sub.add_parser("piecewise-synthetic-report", help="Generate experimental synthetic piecewise-affine feasibility reports")
+    synthetic.add_argument("--output", required=True)
+
+    gui = sub.add_parser("anchoring-gui", help="Launch the experimental v0.2.2 anchoring GUI")
+    gui.add_argument("--sqlite", required=True)
+    gui.add_argument("--artifact-root", required=True)
+    gui.add_argument("--rgb-root", required=True)
+    gui.add_argument("--subject", required=True)
+    gui.add_argument("--mapping-version", required=True)
+    gui.add_argument("--annotator-id", default="")
 
     return parser
 
@@ -264,6 +316,77 @@ def main(argv: list[str] | None = None) -> int:
             result.pair_report.to_csv(args.pair_report_csv, index=False)
 
         return 0
+
+
+
+    if args.command == "fit-piecewise":
+        source = TimelineSelection(args.subject, args.source_run, args.source_device, args.source_timeline)
+        target = TimelineSelection(args.subject, args.target_run, args.target_device, args.target_timeline)
+        try:
+            result = PiecewiseSyncService(args.sqlite).fit_piecewise_and_generate_mapping(
+                source,
+                target,
+                sync_model_id=args.sync_model,
+                mapping_version_id=args.mapping_version,
+                parent_mapping_version_id=args.parent_mapping_version,
+                top_k=args.top_k,
+                weak_support_threshold_ms=args.weak_support_threshold_ms,
+                max_allowed_delta_ms=args.max_allowed_delta_ms,
+                extrapolation_policy=args.extrapolation_policy.replace("-", "_"),
+                primary_policy=args.primary_policy.replace("-", "_"),
+                overwrite=args.overwrite,
+                require_monotonic_target=not args.allow_nonmonotonic_target,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 2
+        print("Piecewise affine sync model fitted and mapping generated.")
+        print(result.diagnostics.to_string(index=False))
+        if args.diagnostics_csv:
+            Path(args.diagnostics_csv).parent.mkdir(parents=True, exist_ok=True)
+            result.diagnostics.to_csv(args.diagnostics_csv, index=False)
+        return 0
+
+    if args.command == "export-anchors":
+        payload = AnchorService(args.sqlite).export_pair_anchors_json(
+            args.output,
+            subject_id=args.subject,
+            source_run_id=args.source_run,
+            source_device_type=args.source_device,
+            target_run_id=args.target_run,
+            target_device_type=args.target_device,
+            session_metadata={
+                "annotator_id": args.annotator_id,
+                "initial_mapping_version_id": args.initial_mapping_version,
+            },
+        )
+        print(f"Exported {len(payload.get('ANCHOR', []))} anchors to {args.output}")
+        return 0
+
+    if args.command == "import-anchors":
+        counts = AnchorService(args.sqlite).import_anchors_json(args.input, overwrite=args.overwrite)
+        print(json.dumps(counts, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "piecewise-synthetic-report":
+        summary = build_piecewise_synthetic_report(args.output)
+        print(summary.to_string(index=False))
+        return 0
+
+    if args.command == "anchoring-gui":
+        try:
+            from sync_workbench.experimental.anchoring_gui.app import run_anchoring_gui
+            return run_anchoring_gui(
+                sqlite_path=args.sqlite,
+                artifact_root=args.artifact_root,
+                rgb_root=args.rgb_root,
+                subject_id=args.subject,
+                mapping_version_id=args.mapping_version,
+                annotator_id=args.annotator_id,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}")
+            return 2
 
     raise AssertionError(f"Unhandled command {args.command}")
 

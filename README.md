@@ -1,8 +1,8 @@
-# Multi-modal Synchronisation Workbench v0.2.1
+# Multi-modal Synchronisation Workbench v0.2.2
 
 Backend-first implementation of the Multi-modal Synchronisation Workbench.
 
-v0.2.1 keeps the v0.1 canonical ingestion and nearest-time mapping baseline, then adds an artifact and payload access layer for RGB pose/activity payloads and radar point-cloud payloads. The GUI-facing boundary is now service-based: frontends should call payload/pair-inspection services rather than reading temporary `.zst` files or artifact bundle internals directly.
+v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and artifact payload layers, then adds official backend support for anchor creation/export, piecewise-affine sync fitting, revised mapping generation, synthetic feasibility probes, simple RGB video-frame access, and a bare-bones experimental anchoring GUI. The GUI-facing boundary remains service-based: frontends should call services rather than reading temporary `.zst` files, artifact bundle internals, or SQLite tables directly.
 
 ## What the backend does
 
@@ -34,6 +34,11 @@ v0.2.1 keeps the v0.1 canonical ingestion and nearest-time mapping baseline, the
 - Exports reports and optional Parquet/CSV canonical tables.
 - Builds run-level artifact bundles for `pose2d`, `conf2d`, `pose3d`, `activity`, and radar `points`.
 - Provides services and CLI commands for payload retrieval, artifact auditing, and mapped-pair inspection.
+- Creates, exports, and imports canonical pair anchors.
+- Fits official `piecewise_affine` sync models from anchors and generates revised mapping versions.
+- Generates lightweight synthetic feasibility reports for piecewise-affine behaviour.
+- Provides simple run-level RGB video frame access through `RUN_ASSET(asset_role="rgb_video")`.
+- Provides a minimal experimental anchoring GUI under `sync_workbench.experimental`.
 
 ## Install for development
 
@@ -126,6 +131,110 @@ syncwb inspect-pair \
 ```
 
 This uses `SAMPLE_MAPPING` to find the target candidate and reports source/target summaries plus available payload roles and shapes. It is the service/CLI path the experimental GUI should build on.
+
+
+## RGB video assets for v0.2.2
+
+The v0.2.1 artifact store contains derived payload bundles such as poses, activity dictionaries, and radar point clouds. It does not store Kinect MP4 videos. RGB videos remain run-level `RUN_ASSET` entries with `asset_role=rgb_video` and `storage_key=rgb`.
+
+For simple annotator packages, provide an RGB root whose contents match the `asset_ref` values stored in `RUN_ASSET`. With the current temporary ingestion files, those refs normally look like:
+
+```text
+<subject_id>/<rgb_run_id>/kinect_camera_recording_rgb_lq.mp4
+```
+
+So the corresponding local package can be:
+
+```text
+rgb_videos/
+  <subject_id>/
+    <rgb_run_id>/
+      kinect_camera_recording_rgb_lq.mp4
+```
+
+The video frame service resolves the path as `rgb_root / asset_ref` and seeks by canonical `RUN_SAMPLE.sample_index`. The raw `rgb_samples.frame_number` may start at 1; frame seeking should still use the canonical zero-based sample index.
+
+## Create and export anchors
+
+Anchors are canonical metadata, not GUI-only state. A pair anchor writes one `ANCHOR` row and two `ANCHOR_MEMBER` rows. The experimental GUI calls `AnchorService`; it does not write raw SQLite rows directly.
+
+Anchor exports can be written as JSON for transfer back to a master workbench database:
+
+```bash
+syncwb export-anchors \
+  --sqlite workbench_subject_19_MM.sqlite \
+  --output anchors_19_MM.json \
+  --subject 19_MM \
+  --source-run "<rgb_run_id>" \
+  --source-device kinect_rgb \
+  --target-run "<radar_run_id>" \
+  --target-device radar_pc \
+  --annotator-id RA01 \
+  --initial-mapping-version initial_rgb_to_pc_v001
+```
+
+Import them later with:
+
+```bash
+syncwb import-anchors \
+  --sqlite workbench.sqlite \
+  --input anchors_19_MM.json
+```
+
+## Fit a piecewise-affine sync model
+
+After at least two source-target pair anchors exist, fit a piecewise-affine model and generate a revised mapping version:
+
+```bash
+syncwb fit-piecewise \
+  --sqlite workbench.sqlite \
+  --subject 19_MM \
+  --source-run "<rgb_run_id>" \
+  --source-device kinect_rgb \
+  --source-timeline rgb_wallclock_from_pts \
+  --target-run "<radar_run_id>" \
+  --target-device radar_pc \
+  --target-timeline radar_pc_linear_from_index \
+  --sync-model piecewise_rgb_to_pc_v001 \
+  --mapping-version piecewise_rgb_to_pc_v001_map \
+  --parent-mapping-version initial_rgb_to_pc_v001 \
+  --top-k 3 \
+  --extrapolation-policy disallow \
+  --primary-policy supported-only \
+  --diagnostics-csv reports/piecewise_rgb_to_pc_v001.csv
+```
+
+This writes a real `SYNC_MODEL(model_type=piecewise_affine)`, `MODEL_ANCHOR`, `MAPPING_VERSION`, and `SAMPLE_MAPPING` rows. The piecewise algorithm itself lives in `sync_workbench.sync.piecewise_affine`; the CLI and GUI are clients of the official backend code.
+
+## Run the synthetic piecewise feasibility sandbox
+
+```bash
+syncwb piecewise-synthetic-report --output reports/piecewise_synthetic
+```
+
+The report creates small synthetic cases covering identity mapping, constant offset, global affine drift, piecewise drift, sparse anchors, a deliberately bad anchor, partial overlap, before/after-anchor extrapolation, target gaps, and 15 FPS vs 20 FPS frame rates. The sandbox lives under `sync_workbench.experimental.feasibility`; only the piecewise-affine algorithm is official backend code.
+
+## Launch the experimental anchoring GUI
+
+Install optional GUI dependencies first:
+
+```bash
+python -m pip install -e ".[gui]"
+```
+
+Then launch the experimental GUI from a subject-scoped SQLite database, an artifact root, an RGB video root, and an initial mapping version:
+
+```bash
+syncwb anchoring-gui \
+  --sqlite workbench_subject_19_MM.sqlite \
+  --artifact-root artifact_store \
+  --rgb-root rgb_videos \
+  --subject 19_MM \
+  --mapping-version initial_rgb_to_pc_v001 \
+  --annotator-id RA01
+```
+
+The GUI is deliberately experimental. It supports only one subject and one source-target mapping pair at a time. It should be treated as a feasibility tool for placing anchors and checking whether piecewise-affine synchronisation is worth continuing, not as the final production workbench.
 
 ## Generate an initial RGB-to-radar mapping for one source/target run pair
 
