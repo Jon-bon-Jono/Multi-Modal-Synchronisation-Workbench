@@ -432,10 +432,50 @@ def make_main_window_class():
             self._stop_playback()
             self._step_target_no_stop(delta)
 
+        def _current_target_offset_from_mapping(self) -> int:
+            """Return current target offset relative to the active source->target mapping.
+
+            If the current pair is already synced, this is 0. If the user has manually
+            nudged the target ahead/behind the mapped target, this preserves that offset
+            when stepping both streams.
+            """
+            try:
+                mapped_target = int(self.controller.sync_target_to_source(int(self.source_sample)))
+                return int(self.target_sample) - mapped_target
+            except Exception:
+                return 0
+
+
+        def _target_for_source_preserving_offset(
+            self,
+            source_sample: int,
+            target_offset: int,
+            *,
+            fallback_target_delta: int = 0,
+        ) -> int:
+            """Map source_sample to target, preserving the current manual target offset."""
+            try:
+                mapped_target = int(self.controller.sync_target_to_source(int(source_sample)))
+                return self._clamp_target(mapped_target + int(target_offset))
+            except Exception:
+                # If the mapping lookup fails, fall back to the old behaviour.
+                return self._clamp_target(int(self.target_sample) + int(fallback_target_delta))
+        
         def step_both(self, delta: int) -> None:
             self._stop_playback()
-            self.source_sample = self._clamp_source(self.source_sample + int(delta))
-            self.target_sample = self._clamp_target(self.target_sample + int(delta))
+
+            target_offset = self._current_target_offset_from_mapping()
+
+            new_source = self._clamp_source(self.source_sample + int(delta))
+            new_target = self._target_for_source_preserving_offset(
+                new_source,
+                target_offset,
+                fallback_target_delta=int(delta),
+            )
+
+            self.source_sample = new_source
+            self.target_sample = new_target
+
             self._set_spin_value(self.source_spin, self.source_sample)
             self._set_spin_value(self.target_spin, self.target_sample)
             self.refresh_all(refresh_anchors=False)
@@ -448,8 +488,23 @@ def make_main_window_class():
 
         def step_both_seconds(self, seconds: float) -> None:
             self._stop_playback()
-            self.source_sample = self._clamp_source(self.source_sample + round(float(seconds) * float(self.source_fps)))
-            self.target_sample = self._clamp_target(self.target_sample + round(float(seconds) * float(self.target_fps)))
+
+            seconds = float(seconds)
+            source_delta = round(seconds * float(self.source_fps))
+            target_delta_fallback = round(seconds * float(self.target_fps))
+
+            target_offset = self._current_target_offset_from_mapping()
+
+            new_source = self._clamp_source(self.source_sample + source_delta)
+            new_target = self._target_for_source_preserving_offset(
+                new_source,
+                target_offset,
+                fallback_target_delta=target_delta_fallback,
+            )
+
+            self.source_sample = new_source
+            self.target_sample = new_target
+
             self._set_spin_value(self.source_spin, self.source_sample)
             self._set_spin_value(self.target_spin, self.target_sample)
             self.refresh_all(refresh_anchors=False)
