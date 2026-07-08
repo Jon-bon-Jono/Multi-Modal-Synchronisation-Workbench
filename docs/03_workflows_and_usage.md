@@ -534,3 +534,9 @@ syncwb piecewise-synthetic-report --output reports/piecewise_synthetic
 ```
 
 The synthetic sandbox is intentionally under `experimental/feasibility`. It validates and illustrates the official piecewise-affine implementation using controlled cases before real anchor sessions are used.
+### 16.4 Experimental anchoring GUI controls
+
+The v0.2.2 patched experimental GUI provides separate controls for the source stream, target stream, and both streams together. Each stream supports play/pause, frame jumps of +/-1, +/-5, +/-10, and +/-100 frames, and time jumps of +/-1, +/-5, +/-10, and +/-60 seconds. The source and target sample-index boxes support direct entry; pressing Enter or leaving the field jumps to that sample.
+
+The GUI also provides synchronisation-assist actions (`sync target to source` and `sync source to target`), canonical anchor creation, selected-anchor deletion, anchor export, and a finish-session action. Frame movement should not reload the anchor table from SQLite; the anchor table is refreshed only after anchor actions or initial load.
+

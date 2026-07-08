@@ -122,6 +122,29 @@ class RaggedNpzReader:
         end = int(self.offsets[pos + 1])
         return self.values[start:end]
 
+    def get_index_range(self, start_sample_index: int, end_sample_index: int) -> np.ndarray:
+        """Return concatenated payload rows for a sample-index interval.
+
+        The interval is inclusive and uses canonical sample indices. Missing
+        sample indices are skipped. This is much faster than repeatedly calling
+        ``get`` and ``np.vstack`` for GUI point-cloud windows because it slices
+        the underlying concatenated ``values`` array once.
+        """
+        if int(end_sample_index) < int(start_sample_index):
+            shape = (0, *self.values.shape[1:])
+            return np.empty(shape, dtype=self.values.dtype)
+
+        left = int(np.searchsorted(self.sample_index, int(start_sample_index), side="left"))
+        right = int(np.searchsorted(self.sample_index, int(end_sample_index), side="right"))
+
+        if left >= right:
+            shape = (0, *self.values.shape[1:])
+            return np.empty(shape, dtype=self.values.dtype)
+
+        start = int(self.offsets[left])
+        end = int(self.offsets[right])
+        return self.values[start:end]
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if len(self.offsets) != len(self.sample_index) + 1:

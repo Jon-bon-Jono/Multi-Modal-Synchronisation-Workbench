@@ -92,6 +92,58 @@ class PayloadService:
             out[str(row.artifact_role)] = self._read_payload(row)
         return out
 
+    def get_ragged_payload_window(
+        self,
+        subject_id: str,
+        run_id: str,
+        device_type: str,
+        center_sample_index: int,
+        artifact_role: str,
+        *,
+        radius: int = 0,
+        min_sample_index: int | None = None,
+        max_sample_index: int | None = None,
+    ) -> Any:
+        """Read a contiguous sample-index window from a ragged NPZ bundle."""
+        radius = max(0, int(radius or 0))
+        center = int(center_sample_index)
+        start_sample = center - radius
+        end_sample = center + radius
+
+        if min_sample_index is not None:
+            start_sample = max(int(min_sample_index), start_sample)
+
+        if max_sample_index is not None:
+            end_sample = min(int(max_sample_index), end_sample)
+
+        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, center)
+        rows = rows[rows["artifact_role"].astype(str) == str(artifact_role)]
+
+        if rows.empty:
+            raise KeyError(
+                f"No artifact role {artifact_role!r} for "
+                f"{subject_id}/{run_id}/{device_type}/sample {center}."
+            )
+
+        row = rows.iloc[0]
+        artifact_format = str(getattr(row, "artifact_format", ""))
+
+        if artifact_format != "ragged_npz":
+            if radius == 0:
+                return self._read_payload(row)
+            raise ValueError(
+                f"Window reads only support ragged_npz artifacts, got {artifact_format!r}."
+            )
+
+        path = self.artifact_store.path_for_ref(str(getattr(row, "artifact_ref")))
+
+        reader = self._npz_cache.get(path)
+        if reader is None:
+            reader = RaggedNpzReader(path)
+            self._npz_cache[path] = reader
+
+        return reader.get_index_range(start_sample, end_sample)
+    
     def get_mapped_pair_payloads(
         self,
         subject_id: str,

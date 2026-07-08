@@ -14,10 +14,12 @@ from sync_workbench.experimental.anchoring_gui.anchor_table import AnchorTable
 from sync_workbench.experimental.anchoring_gui.controllers import AnchoringController
 from sync_workbench.experimental.anchoring_gui.pointcloud_panel import PointCloudPanel
 from sync_workbench.experimental.anchoring_gui.video_panel import VideoPanel
+from sync_workbench.experimental.anchoring_gui.visualization_utils import filter_noise_points, project_pc_to_digital
 
 
 def _imports():
-    from PySide6.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QRectF, Qt, QTimer  # type: ignore
+    from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPixmap  # type: ignore
     from PySide6.QtWidgets import (  # type: ignore
         QFileDialog,
         QGridLayout,
@@ -28,12 +30,21 @@ def _imports():
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QSpinBox,
         QVBoxLayout,
         QWidget,
+        QInputDialog
     )
 
     return (
+        Qt,
+        QRectF,
+        QColor, 
+        QLinearGradient, 
+        QPainter, 
+        QPixmap,
         QTimer,
         QFileDialog,
         QGridLayout,
@@ -44,14 +55,23 @@ def _imports():
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QSpinBox,
         QVBoxLayout,
         QWidget,
+        QInputDialog
     )
 
 
 def make_main_window_class():
     (
+        Qt,
+        QRectF,
+        QColor, 
+        QLinearGradient, 
+        QPainter, 
+        QPixmap,
         QTimer,
         QFileDialog,
         QGridLayout,
@@ -62,13 +82,17 @@ def make_main_window_class():
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QSpinBox,
         QVBoxLayout,
         QWidget,
+        QInputDialog
     ) = _imports()
 
     class MainWindow(QMainWindow):
         FRAME_DELTAS = [-100, -10, -5, -1, 1, 5, 10, 100]
+        FINE_SECOND_DELTAS = [-0.5, -0.2, -0.1, -0.05, 0.05, 0.1, 0.2, 0.5]
         SECOND_DELTAS = [-60, -10, -5, -1, 1, 5, 10, 60]
 
         def __init__(self, controller: AnchoringController):
@@ -83,6 +107,18 @@ def make_main_window_class():
             self._both_base_source_sample = 0
             self._both_base_target_sample = 0
             self._both_target_offset_from_mapping = 0
+            self.point_color_mode = "constant"
+            self.filter_noise_points = False
+            self.show_pose3d_in_pointcloud = False
+            self.show_pose2d_overlay = False
+            self.show_projected_pc_overlay = False
+            self.show_video_frames = True
+            self._projected_pc_cache: dict[tuple[int, bool], object] = {}
+            self.pc_window_radius = 0
+            self._target_points_cache_key: tuple[int, int] | None = None
+            self._target_points_cache_value: object | None = None
+            self._projected_pc_cache_key: tuple[int, int, bool] | None = None
+            self._projected_pc_cache_value: object | None = None
 
             self.source_max = self.controller.max_sample(self.controller.source_run_id, self.controller.source_device_type)
             self.target_max = self.controller.max_sample(self.controller.target_run_id, self.controller.target_device_type)
@@ -92,6 +128,19 @@ def make_main_window_class():
             self.setWindowTitle("SyncWB experimental anchoring GUI")
             self.video_panel = VideoPanel()
             self.point_panel = PointCloudPanel()
+
+            self.point_colour_legend = QLabel("")
+            self.point_colour_legend.setMinimumHeight(24)
+            self.point_colour_legend.setVisible(False)
+
+            self.point_colour_legend_ticks = QLabel("")
+            self.point_colour_legend_ticks.setAlignment(Qt.AlignCenter)
+            self.point_colour_legend_ticks.setVisible(False)
+
+            self.anchor_table = AnchorTable()
+            self.status = QLabel("")
+            self.point_colour_legend.setMinimumHeight(22)
+            self.point_colour_legend.setWordWrap(True)
             self.anchor_table = AnchorTable()
             self.status = QLabel("")
             self.status.setWordWrap(True)
@@ -113,6 +162,22 @@ def make_main_window_class():
             self.source_play_button = QPushButton("play source")
             self.target_play_button = QPushButton("play target")
             self.both_play_button = QPushButton("play both")
+            self.color_mode_button = QPushButton("colour: none")
+            self.filter_noise_button = QPushButton("filter noise: off")
+            self.pose3d_button = QPushButton("3D pose: off")
+            self.pose2d_button = QPushButton("2D pose: off")
+            self.pc2d_button = QPushButton("2D PC: off")
+            self.video_toggle_button = QPushButton("video: on")
+            self.pc_window_button = QPushButton("PC window: ±0")
+            for button in [
+                self.filter_noise_button,
+                self.pose3d_button,
+                self.pose2d_button,
+                self.pc2d_button,
+                self.video_toggle_button,
+            ]:
+                button.setCheckable(True)
+            self.video_toggle_button.setChecked(True)
 
             self.source_timer = QTimer(self)
             self.source_timer.timeout.connect(self._advance_source_playback)
@@ -125,6 +190,7 @@ def make_main_window_class():
             self.both_timer.setInterval(min(self._timer_interval_ms(self.source_fps), self._timer_interval_ms(self.target_fps)))
 
             self._build_layout()
+            self._update_point_colour_legend()
             self.refresh_all(refresh_anchors=True)
 
         @staticmethod
@@ -132,21 +198,48 @@ def make_main_window_class():
             fps = max(1.0, float(fps or 1.0))
             return max(1, int(round(1000.0 / fps)))
 
+        @staticmethod
+        def _seconds_button_label(seconds: float) -> str:
+            return f"{float(seconds):+g}s"
+        
         def _build_layout(self):
             root = QWidget()
             outer = QVBoxLayout(root)
 
             panels = QHBoxLayout()
             panels.addWidget(self.video_panel, stretch=1)
-            panels.addWidget(self.point_panel, stretch=1)
+
+            point_container = QWidget()
+            point_layout = QVBoxLayout(point_container)
+            point_layout.setContentsMargins(0, 0, 0, 0)
+            point_layout.addWidget(self.point_panel, stretch=1)
+            point_layout.addWidget(self.point_colour_legend)
+            point_layout.addWidget(self.point_colour_legend_ticks)
+
+            panels.addWidget(point_container, stretch=1)
             outer.addLayout(panels, stretch=4)
 
-            controls = QHBoxLayout()
+            controls_widget = QWidget()
+            controls = QHBoxLayout(controls_widget)
+            controls.setContentsMargins(0, 0, 0, 0)
+
             controls.addWidget(self._make_stream_group("Source", self.source_spin, self.source_play_button, "source"))
             controls.addWidget(self._make_stream_group("Target", self.target_spin, self.target_play_button, "target"))
             controls.addWidget(self._make_both_group())
+            controls.addWidget(self._make_visual_group())
             controls.addWidget(self._make_anchor_group())
-            outer.addLayout(controls)
+            controls.addStretch(1)
+
+            controls_scroll = QScrollArea()
+            controls_scroll.setWidget(controls_widget)
+            controls_scroll.setWidgetResizable(False)
+            controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            controls_scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
+            controls_scroll.setMinimumWidth(0)
+            controls_scroll.setMaximumHeight(260)
+
+            outer.addWidget(controls_scroll)
 
             outer.addWidget(self.status)
             outer.addWidget(self.anchor_table, stretch=1)
@@ -173,10 +266,21 @@ def make_main_window_class():
                 frames.addWidget(button, 0, idx)
             layout.addLayout(frames)
 
+            fine_seconds = QGridLayout()
+            fine_seconds.addWidget(QLabel("fine sec"), 0, 0)
+            for idx, delta in enumerate(self.FINE_SECOND_DELTAS, start=1):
+                button = QPushButton(self._seconds_button_label(delta))
+                if stream == "source":
+                    button.clicked.connect(lambda _=False, d=delta: self.step_source_seconds(d))
+                else:
+                    button.clicked.connect(lambda _=False, d=delta: self.step_target_seconds(d))
+                fine_seconds.addWidget(button, 0, idx)
+            layout.addLayout(fine_seconds)
+
             seconds = QGridLayout()
             seconds.addWidget(QLabel("seconds"), 0, 0)
             for idx, delta in enumerate(self.SECOND_DELTAS, start=1):
-                button = QPushButton(f"{delta:+d}s")
+                button = QPushButton(self._seconds_button_label(delta))
                 if stream == "source":
                     button.clicked.connect(lambda _=False, d=delta: self.step_source_seconds(d))
                 else:
@@ -199,10 +303,18 @@ def make_main_window_class():
                 frames.addWidget(button, 0, idx)
             layout.addLayout(frames)
 
+            fine_seconds = QGridLayout()
+            fine_seconds.addWidget(QLabel("fine sec"), 0, 0)
+            for idx, delta in enumerate(self.FINE_SECOND_DELTAS, start=1):
+                button = QPushButton(self._seconds_button_label(delta))
+                button.clicked.connect(lambda _=False, d=delta: self.step_both_seconds(d))
+                fine_seconds.addWidget(button, 0, idx)
+            layout.addLayout(fine_seconds)
+
             seconds = QGridLayout()
             seconds.addWidget(QLabel("seconds"), 0, 0)
             for idx, delta in enumerate(self.SECOND_DELTAS, start=1):
-                button = QPushButton(f"{delta:+d}s")
+                button = QPushButton(self._seconds_button_label(delta))
                 button.clicked.connect(lambda _=False, d=delta: self.step_both_seconds(d))
                 seconds.addWidget(button, 0, idx)
             layout.addLayout(seconds)
@@ -215,6 +327,27 @@ def make_main_window_class():
             sync_row.addWidget(sync_target)
             sync_row.addWidget(sync_source)
             layout.addLayout(sync_row)
+            return group
+
+        def _make_visual_group(self):
+            group = QGroupBox("Visualisation")
+            layout = QVBoxLayout(group)
+
+            self.color_mode_button.clicked.connect(self.cycle_point_colour_mode)
+            self.filter_noise_button.clicked.connect(self.toggle_filter_noise)
+            self.pose3d_button.clicked.connect(self.toggle_pose3d)
+            self.pose2d_button.clicked.connect(self.toggle_pose2d)
+            self.pc2d_button.clicked.connect(self.toggle_projected_pc)
+            self.video_toggle_button.clicked.connect(self.toggle_video_frames)
+            self.pc_window_button.clicked.connect(self.set_pc_window_radius)
+
+            layout.addWidget(self.color_mode_button)
+            layout.addWidget(self.filter_noise_button)
+            layout.addWidget(self.pose3d_button)
+            layout.addWidget(self.pose2d_button)
+            layout.addWidget(self.pc2d_button)
+            layout.addWidget(self.video_toggle_button)
+            layout.addWidget(self.pc_window_button)
             return group
 
         def _make_anchor_group(self):
@@ -279,12 +412,16 @@ def make_main_window_class():
             self.source_sample = self._clamp_source(self.source_sample + int(delta))
             self._set_spin_value(self.source_spin, self.source_sample)
             self.refresh_source()
+            if self.show_pose3d_in_pointcloud:
+                self.refresh_target()
             self.refresh_status()
 
         def _step_target_no_stop(self, delta: int) -> None:
             self.target_sample = self._clamp_target(self.target_sample + int(delta))
             self._set_spin_value(self.target_spin, self.target_sample)
             self.refresh_target()
+            if self.show_projected_pc_overlay:
+                self.refresh_source()
             self.refresh_status()
 
         def step_source(self, delta: int) -> None:
@@ -424,8 +561,7 @@ def make_main_window_class():
             try:
                 self.target_sample = self._clamp_target(self.controller.sync_target_to_source(self.source_sample))
                 self._set_spin_value(self.target_spin, self.target_sample)
-                self.refresh_target()
-                self.refresh_status()
+                self.refresh_all(refresh_anchors=False)
             except Exception as exc:
                 self._show_error("sync target to source failed", exc)
 
@@ -434,8 +570,7 @@ def make_main_window_class():
             try:
                 self.source_sample = self._clamp_source(self.controller.sync_source_to_target(self.target_sample))
                 self._set_spin_value(self.source_spin, self.source_sample)
-                self.refresh_source()
-                self.refresh_status()
+                self.refresh_all(refresh_anchors=False)
             except Exception as exc:
                 self._show_error("sync source to target failed", exc)
 
@@ -463,6 +598,134 @@ def make_main_window_class():
             except Exception as exc:
                 self._show_error("delete anchor failed", exc)
 
+        def cycle_point_colour_mode(self) -> None:
+            modes = ["constant", "snr", "doppler"]
+            idx = modes.index(self.point_color_mode) if self.point_color_mode in modes else 0
+            self.point_color_mode = modes[(idx + 1) % len(modes)]
+
+            label = {
+                "constant": "none",
+                "snr": "SNR",
+                "doppler": "Doppler",
+            }[self.point_color_mode]
+
+            self.color_mode_button.setText(f"colour: {label}")
+            self._update_point_colour_legend()
+            self.refresh_target()
+
+            if self.show_projected_pc_overlay:
+                self.refresh_source()
+
+        def _make_doppler_legend_pixmap(self, width: int = 420, height: int = 18):
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.transparent)
+
+            painter = QPainter(pixmap)
+            gradient = QLinearGradient(0, 0, width, 0)
+
+            # Must match visualization_utils.point_rgba:
+            # norm=0 -> blue, norm=0.5 -> green, norm=1 -> red.
+            gradient.setColorAt(0.0, QColor(0, 80, 255))
+            gradient.setColorAt(0.5, QColor(40, 220, 40))
+            gradient.setColorAt(1.0, QColor(255, 60, 30))
+
+            painter.fillRect(QRectF(0, 0, width, height), gradient)
+            painter.setPen(QColor(220, 220, 220))
+            painter.drawRect(0, 0, width - 1, height - 1)
+            painter.end()
+
+            return pixmap
+
+
+        def _make_snr_legend_pixmap(self, width: int = 420, height: int = 18):
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.transparent)
+
+            painter = QPainter(pixmap)
+            gradient = QLinearGradient(0, 0, width, 0)
+
+            # Same blue -> green -> red ramp, but SNR is still auto-normalised.
+            gradient.setColorAt(0.0, QColor(0, 80, 255))
+            gradient.setColorAt(0.5, QColor(40, 220, 40))
+            gradient.setColorAt(1.0, QColor(255, 60, 30))
+
+            painter.fillRect(QRectF(0, 0, width, height), gradient)
+            painter.setPen(QColor(220, 220, 220))
+            painter.drawRect(0, 0, width - 1, height - 1)
+            painter.end()
+
+            return pixmap
+
+
+        def _update_point_colour_legend(self) -> None:
+            if self.point_color_mode == "doppler":
+                self.point_colour_legend.setPixmap(self._make_doppler_legend_pixmap())
+                self.point_colour_legend_ticks.setText("-3 m/s        0 m/s        +3 m/s")
+                self.point_colour_legend.setVisible(True)
+                self.point_colour_legend_ticks.setVisible(True)
+            elif self.point_color_mode == "snr":
+                self.point_colour_legend.setPixmap(self._make_snr_legend_pixmap())
+                self.point_colour_legend_ticks.setText("low SNR        mid SNR        high SNR")
+                self.point_colour_legend.setVisible(True)
+                self.point_colour_legend_ticks.setVisible(True)
+            else:
+                self.point_colour_legend.clear()
+                self.point_colour_legend_ticks.clear()
+                self.point_colour_legend.setVisible(False)
+                self.point_colour_legend_ticks.setVisible(False)
+
+        def toggle_filter_noise(self) -> None:
+            self.filter_noise_points = bool(self.filter_noise_button.isChecked())
+            self.filter_noise_button.setText("filter noise: on" if self.filter_noise_points else "filter noise: off")
+            self._clear_projected_point_cache()
+            self.refresh_target()
+            if self.show_projected_pc_overlay:
+                self.refresh_source()
+
+        def toggle_pose3d(self) -> None:
+            self.show_pose3d_in_pointcloud = bool(self.pose3d_button.isChecked())
+            self.pose3d_button.setText("3D pose: on" if self.show_pose3d_in_pointcloud else "3D pose: off")
+            self.refresh_target()
+
+        def toggle_pose2d(self) -> None:
+            self.show_pose2d_overlay = bool(self.pose2d_button.isChecked())
+            self.pose2d_button.setText("2D pose: on" if self.show_pose2d_overlay else "2D pose: off")
+            self.refresh_source()
+
+        def toggle_projected_pc(self) -> None:
+            self.show_projected_pc_overlay = bool(self.pc2d_button.isChecked())
+            self.pc2d_button.setText("2D PC: on" if self.show_projected_pc_overlay else "2D PC: off")
+            self.refresh_source()
+
+        def toggle_video_frames(self) -> None:
+            self.show_video_frames = bool(self.video_toggle_button.isChecked())
+            self.video_toggle_button.setText("video: on" if self.show_video_frames else "video: off")
+            self.refresh_source()
+
+        def set_pc_window_radius(self) -> None:
+            value, ok = QInputDialog.getInt(
+                self,
+                "Set radar point-cloud frame window",
+                "Display target point clouds from current target sample ± n frames:",
+                int(self.pc_window_radius),
+                0,
+                200,
+                1,
+            )
+
+            if not ok:
+                return
+
+            self.pc_window_radius = int(value)
+            self.pc_window_button.setText(f"PC window: ±{self.pc_window_radius}")
+
+            self._clear_point_window_caches()
+
+            self.refresh_target()
+
+            if self.show_projected_pc_overlay:
+                self.refresh_source()
+
         def export_anchors(self) -> None:
             path, _ = QFileDialog.getSaveFileName(self, "Export anchors", "anchors.json", "JSON files (*.json);;All files (*)")
             if not path:
@@ -479,15 +742,74 @@ def make_main_window_class():
             if refresh_anchors:
                 self.refresh_anchors()
 
+        def _current_target_points(self):
+            key = (int(self.target_sample), int(self.pc_window_radius))
+
+            if key != self._target_points_cache_key:
+                self._target_points_cache_value = self.controller.get_target_points_window(
+                    self.target_sample,
+                    self.pc_window_radius,
+                )
+                self._target_points_cache_key = key
+
+                # Projected points depend on the current target points.
+                self._clear_projected_point_cache()
+
+            return self._target_points_cache_value
+
+        def _clear_point_window_caches(self) -> None:
+            self._target_points_cache_key = None
+            self._target_points_cache_value = None
+            self._clear_projected_point_cache()
+
+        def _clear_projected_point_cache(self) -> None:
+            self._projected_pc_cache_key = None
+            self._projected_pc_cache_value = None
+
+        def _current_target_points_for_display(self):
+            points = self._current_target_points()
+            return filter_noise_points(points) if self.filter_noise_points else points
+
+        def _current_projected_points(self):
+            key = (
+                int(self.target_sample),
+                int(self.pc_window_radius),
+                bool(self.filter_noise_points),
+            )
+
+            if key != self._projected_pc_cache_key:
+                self._projected_pc_cache_value = project_pc_to_digital(
+                    self._current_target_points(),
+                    filter_noise=self.filter_noise_points,
+                )
+                self._projected_pc_cache_key = key
+
+            return self._projected_pc_cache_value
+
         def refresh_source(self) -> None:
             try:
-                self.video_panel.set_frame(self.controller.get_rgb_frame(self.source_sample))
+                frame = self.controller.get_rgb_frame(self.source_sample) if self.show_video_frames else None
+                pose2d = self.controller.get_source_pose2d(self.source_sample) if self.show_pose2d_overlay else None
+                projected_points = self._current_projected_points() if self.show_projected_pc_overlay else None
+                self.video_panel.set_options(
+                    show_video=self.show_video_frames,
+                    show_pose2d=self.show_pose2d_overlay,
+                    show_projected_pc=self.show_projected_pc_overlay,
+                    projected_pc_color_mode=self.point_color_mode,
+                )
+                self.video_panel.set_scene(frame_rgb=frame, pose2d=pose2d, projected_points=projected_points)
             except Exception as exc:
-                self.video_panel.setText(f"RGB unavailable: {exc}")
+                self.video_panel.setText(f"RGB/overlay unavailable: {exc}")
 
         def refresh_target(self) -> None:
             try:
-                self.point_panel.set_points(self.controller.get_target_points(self.target_sample))
+                pose3d = self.controller.get_source_pose3d(self.source_sample) if self.show_pose3d_in_pointcloud else None
+                self.point_panel.set_options(
+                    color_mode=self.point_color_mode,
+                    filter_noise=self.filter_noise_points,
+                    show_pose3d=self.show_pose3d_in_pointcloud,
+                )
+                self.point_panel.set_scene(self._current_target_points(), pose3d=pose3d)
             except Exception as exc:
                 self.status.setText(f"Radar points unavailable: {exc}")
 

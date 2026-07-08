@@ -209,7 +209,8 @@ This writes a real `SYNC_MODEL(model_type=piecewise_affine)`, `MODEL_ANCHOR`, `M
 ## Run the synthetic piecewise feasibility sandbox
 
 ```bash
-syncwb piecewise-synthetic-report --output reports/piecewise_synthetic
+syncwb piecewise-synthetic-report \
+  --output reports/piecewise_synthetic
 ```
 
 The report creates small synthetic cases covering identity mapping, constant offset, global affine drift, piecewise drift, sparse anchors, a deliberately bad anchor, partial overlap, before/after-anchor extrapolation, target gaps, and 15 FPS vs 20 FPS frame rates. The sandbox lives under `sync_workbench.experimental.feasibility`; only the piecewise-affine algorithm is official backend code.
@@ -235,6 +236,12 @@ syncwb anchoring-gui \
 ```
 
 The GUI is deliberately experimental. It supports only one subject and one source-target mapping pair at a time. It should be treated as a feasibility tool for placing anchors and checking whether piecewise-affine synchronisation is worth continuing, not as the final production workbench.
+
+The v0.2.2 patched GUI exposes independent source controls, independent target controls, and linked both-stream controls. Each stream can be played/paused, advanced by +/-1, +/-5, +/-10, and +/-100 frames, and advanced by +/-1, +/-5, +/-10, and +/-60 seconds. The source and target sample boxes accept direct sample-index entry; press Enter or leave the field to jump directly. Movement refreshes only the affected stream and status text; the anchor table is refreshed only when anchors are created, deleted, exported, or initially loaded.
+
+The visualisation controls are also experimental but useful for anchoring. The point-cloud panel can colour radar points by SNR or Doppler, toggle removal of noisy GTRACK points, and overlay the current source 3D Kinect pose in radar point-cloud coordinates. Noisy radar points are defined as target ID NaN, 253, 254, or 255. The RGB panel can toggle the 2D pose overlay, toggle the current target radar point cloud projected into the Kinect digital image frame, and toggle the video frame itself. Turning video frames off avoids MP4 decoding while still allowing 2D pose and projected-radar overlays to be shown on a blank canvas.
+
+A practical startup detail: when the GUI opens, the target sample starts at 0. If the initial mapping says source sample 0 corresponds to a later target sample, press `sync target to source` before using `play both`.
 
 ## Generate an initial RGB-to-radar mapping for one source/target run pair
 

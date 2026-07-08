@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import numpy as np
 
 from sync_workbench.services.anchor_service import AnchorEndpoint, AnchorService
 from sync_workbench.services.asset_service import AssetService
@@ -38,6 +39,7 @@ class AnchoringController:
         self.anchors = AnchorService(sqlite_path)
         self._run_sample_bounds: dict[tuple[str, str], int] = {}
         self._nominal_fps: dict[tuple[str, str], float] = {}
+        self._payload_cache: dict[tuple[str, str, int, str], Any] = {}
 
     @property
     def source_run_id(self) -> str:
@@ -97,13 +99,53 @@ class AnchoringController:
     def get_rgb_frame(self, source_sample_index: int):
         return self.video.get_rgb_frame(self.subject_id, self.source_run_id, source_sample_index, device_type=self.source_device_type)
 
+    def _cached_payload(self, run_id: str, device_type: str, sample_index: int, role: str):
+        key = (str(run_id), str(device_type), int(sample_index), str(role))
+        if key in self._payload_cache:
+            return self._payload_cache[key]
+        value = self.payloads.get_payload(
+            self.subject_id,
+            run_id,
+            device_type,
+            int(sample_index),
+            role,
+        )
+        # Keep the cache deliberately small enough for interactive browsing.
+        if len(self._payload_cache) > 512:
+            self._payload_cache.pop(next(iter(self._payload_cache)))
+        self._payload_cache[key] = value
+        return value
+
+    def get_source_pose2d(self, source_sample_index: int):
+        return self._cached_payload(self.source_run_id, self.source_device_type, source_sample_index, "pose2d")
+
+    def get_source_pose3d(self, source_sample_index: int):
+        return self._cached_payload(self.source_run_id, self.source_device_type, source_sample_index, "pose3d")
+
     def get_target_points(self, target_sample_index: int):
-        return self.payloads.get_payload(
+        return self._cached_payload(self.target_run_id, self.target_device_type, target_sample_index, "radar_points")
+
+    def get_target_points_window(self, target_sample_index: int, radius: int = 0):
+        """Return radar points from target_sample_index +/- radius frames.
+
+        radius=0 preserves the original single-frame behaviour. For radius > 0,
+        use PayloadService's ragged-NPZ window reader so interactive browsing
+        does not repeatedly retrieve and stack every neighbouring sample.
+        """
+        radius = max(0, int(radius or 0))
+
+        if radius == 0:
+            return self.get_target_points(target_sample_index)
+
+        return self.payloads.get_ragged_payload_window(
             self.subject_id,
             self.target_run_id,
             self.target_device_type,
-            target_sample_index,
+            int(target_sample_index),
             "radar_points",
+            radius=radius,
+            min_sample_index=0,
+            max_sample_index=self.max_sample(self.target_run_id, self.target_device_type),
         )
 
     def mapping_for_source(self, source_sample_index: int) -> dict[str, Any]:
