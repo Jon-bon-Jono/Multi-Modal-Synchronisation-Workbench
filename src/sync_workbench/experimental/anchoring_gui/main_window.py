@@ -113,6 +113,7 @@ def make_main_window_class():
             self.show_pose2d_overlay = False
             self.show_projected_pc_overlay = False
             self.show_video_frames = True
+            self.point_view_pan_mode = False
             self._projected_pc_cache: dict[tuple[int, bool], object] = {}
             self.pc_window_radius = 0
             self._target_points_cache_key: tuple[int, int] | None = None
@@ -169,12 +170,14 @@ def make_main_window_class():
             self.pc2d_button = QPushButton("2D PC: off")
             self.video_toggle_button = QPushButton("video: on")
             self.pc_window_button = QPushButton("PC window: ±0")
+            self.point_pan_button = QPushButton("3D pan: off")
             for button in [
                 self.filter_noise_button,
                 self.pose3d_button,
                 self.pose2d_button,
                 self.pc2d_button,
                 self.video_toggle_button,
+                self.point_pan_button,
             ]:
                 button.setCheckable(True)
             self.video_toggle_button.setChecked(True)
@@ -340,6 +343,7 @@ def make_main_window_class():
             self.pc2d_button.clicked.connect(self.toggle_projected_pc)
             self.video_toggle_button.clicked.connect(self.toggle_video_frames)
             self.pc_window_button.clicked.connect(self.set_pc_window_radius)
+            self.point_pan_button.clicked.connect(self.toggle_point_pan_mode)
 
             layout.addWidget(self.color_mode_button)
             layout.addWidget(self.filter_noise_button)
@@ -348,6 +352,7 @@ def make_main_window_class():
             layout.addWidget(self.pc2d_button)
             layout.addWidget(self.video_toggle_button)
             layout.addWidget(self.pc_window_button)
+            layout.addWidget(self.point_pan_button)
             return group
 
         def _make_anchor_group(self):
@@ -756,6 +761,11 @@ def make_main_window_class():
             self.show_video_frames = bool(self.video_toggle_button.isChecked())
             self.video_toggle_button.setText("video: on" if self.show_video_frames else "video: off")
             self.refresh_source()
+        
+        def toggle_point_pan_mode(self) -> None:
+            self.point_view_pan_mode = bool(self.point_pan_button.isChecked())
+            self.point_pan_button.setText("3D pan: on" if self.point_view_pan_mode else "3D pan: off")
+            self.point_panel.set_pan_mode(self.point_view_pan_mode)
 
         def set_pc_window_radius(self) -> None:
             value, ok = QInputDialog.getInt(
