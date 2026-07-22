@@ -15,6 +15,8 @@ def run_anchoring_gui(
     subject_id: str,
     mapping_version_id: str,
     annotator_id: str = "",
+    pose_predictions_path: str | Path | None = None,
+    pose_prediction_array: str = "pred_globally_aligned",
 ) -> int:
     try:
         from PySide6.QtWidgets import QApplication  # type: ignore
@@ -28,6 +30,8 @@ def run_anchoring_gui(
         subject_id=subject_id,
         mapping_version_id=mapping_version_id,
         annotator_id=annotator_id,
+        pose_predictions_path=pose_predictions_path,
+        pose_prediction_array=pose_prediction_array,
     )
     app = QApplication.instance() or QApplication([])
     MainWindow = make_main_window_class()

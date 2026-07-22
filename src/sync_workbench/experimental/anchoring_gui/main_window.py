@@ -110,6 +110,9 @@ def make_main_window_class():
             self.point_color_mode = "constant"
             self.filter_noise_points = False
             self.show_pose3d_in_pointcloud = False
+            self.show_predicted_pose3d_in_pointcloud = bool(
+                self.controller.has_pose_predictions
+            )
             self.show_pose2d_overlay = False
             self.show_projected_pc_overlay = False
             self.show_video_frames = True
@@ -166,6 +169,11 @@ def make_main_window_class():
             self.color_mode_button = QPushButton("colour: none")
             self.filter_noise_button = QPushButton("filter noise: off")
             self.pose3d_button = QPushButton("3D pose: off")
+            self.predicted_pose3d_button = QPushButton(
+                "predicted pose: on"
+                if self.show_predicted_pose3d_in_pointcloud
+                else "predicted pose: off"
+            )
             self.pose2d_button = QPushButton("2D pose: off")
             self.pc2d_button = QPushButton("2D PC: off")
             self.video_toggle_button = QPushButton("video: on")
@@ -174,6 +182,7 @@ def make_main_window_class():
             for button in [
                 self.filter_noise_button,
                 self.pose3d_button,
+                self.predicted_pose3d_button,
                 self.pose2d_button,
                 self.pc2d_button,
                 self.video_toggle_button,
@@ -181,6 +190,16 @@ def make_main_window_class():
             ]:
                 button.setCheckable(True)
             self.video_toggle_button.setChecked(True)
+            self.predicted_pose3d_button.setChecked(
+                self.show_predicted_pose3d_in_pointcloud
+            )
+            self.predicted_pose3d_button.setEnabled(
+                self.controller.has_pose_predictions
+            )
+            if not self.controller.has_pose_predictions:
+                self.predicted_pose3d_button.setToolTip(
+                    "Launch the GUI with --pose-predictions to enable this overlay."
+                )
 
             self.source_timer = QTimer(self)
             self.source_timer.timeout.connect(self._advance_source_playback)
@@ -339,6 +358,9 @@ def make_main_window_class():
             self.color_mode_button.clicked.connect(self.cycle_point_colour_mode)
             self.filter_noise_button.clicked.connect(self.toggle_filter_noise)
             self.pose3d_button.clicked.connect(self.toggle_pose3d)
+            self.predicted_pose3d_button.clicked.connect(
+                self.toggle_predicted_pose3d
+            )
             self.pose2d_button.clicked.connect(self.toggle_pose2d)
             self.pc2d_button.clicked.connect(self.toggle_projected_pc)
             self.video_toggle_button.clicked.connect(self.toggle_video_frames)
@@ -348,6 +370,7 @@ def make_main_window_class():
             layout.addWidget(self.color_mode_button)
             layout.addWidget(self.filter_noise_button)
             layout.addWidget(self.pose3d_button)
+            layout.addWidget(self.predicted_pose3d_button)
             layout.addWidget(self.pose2d_button)
             layout.addWidget(self.pc2d_button)
             layout.addWidget(self.video_toggle_button)
@@ -747,6 +770,19 @@ def make_main_window_class():
             self.pose3d_button.setText("3D pose: on" if self.show_pose3d_in_pointcloud else "3D pose: off")
             self.refresh_target()
 
+        def toggle_predicted_pose3d(self) -> None:
+            self.show_predicted_pose3d_in_pointcloud = bool(
+                self.predicted_pose3d_button.isChecked()
+                and self.controller.has_pose_predictions
+            )
+            self.predicted_pose3d_button.setText(
+                "predicted pose: on"
+                if self.show_predicted_pose3d_in_pointcloud
+                else "predicted pose: off"
+            )
+            self.refresh_target()
+            self.refresh_status()
+
         def toggle_pose2d(self) -> None:
             self.show_pose2d_overlay = bool(self.pose2d_button.isChecked())
             self.pose2d_button.setText("2D pose: on" if self.show_pose2d_overlay else "2D pose: off")
@@ -868,15 +904,34 @@ def make_main_window_class():
 
         def refresh_target(self) -> None:
             try:
-                pose3d = self.controller.get_source_pose3d(self.source_sample) if self.show_pose3d_in_pointcloud else None
+                pose3d = (
+                    self.controller.get_source_pose3d(self.source_sample)
+                    if self.show_pose3d_in_pointcloud
+                    else None
+                )
+                prediction_frame = (
+                    self.controller.get_target_pose_prediction(self.target_sample)
+                    if self.show_predicted_pose3d_in_pointcloud
+                    else None
+                )
+                predicted_pose3d = (
+                    prediction_frame.pose_sensor_xyz_m
+                    if prediction_frame is not None
+                    else None
+                )
                 self.point_panel.set_options(
                     color_mode=self.point_color_mode,
                     filter_noise=self.filter_noise_points,
                     show_pose3d=self.show_pose3d_in_pointcloud,
+                    show_predicted_pose3d=self.show_predicted_pose3d_in_pointcloud,
                 )
-                self.point_panel.set_scene(self._current_target_points(), pose3d=pose3d)
+                self.point_panel.set_scene(
+                    self._current_target_points(),
+                    pose3d=pose3d,
+                    predicted_pose3d=predicted_pose3d,
+                )
             except Exception as exc:
-                self.status.setText(f"Radar points unavailable: {exc}")
+                self.status.setText(f"Radar points/pose overlay unavailable: {exc}")
 
         def refresh_status(self) -> None:
             mapping_text = "mapping unavailable"
@@ -893,10 +948,28 @@ def make_main_window_class():
                 )
             except Exception:
                 pass
+            prediction_text = ""
+            if self.controller.has_pose_predictions:
+                prediction_frame = self.controller.get_target_pose_prediction(
+                    self.target_sample
+                )
+                if prediction_frame is None:
+                    prediction_text = "; predicted_pose=unavailable"
+                else:
+                    eligibility = prediction_frame.metric_eligible_single_person
+                    if eligibility is None:
+                        eligibility_text = "unknown"
+                    else:
+                        eligibility_text = "yes" if eligibility else "no"
+                    prediction_text = (
+                        "; predicted_pose=available"
+                        f"; prediction_single_person_metric_eligible={eligibility_text}"
+                    )
+
             self.status.setText(
                 f"source {self.controller.source_device_type}/{self.controller.source_run_id} sample={self.source_sample} "
                 f"of {self.source_max}; target {self.controller.target_device_type}/{self.controller.target_run_id} "
-                f"sample={self.target_sample} of {self.target_max}; {mapping_text}"
+                f"sample={self.target_sample} of {self.target_max}; {mapping_text}{prediction_text}"
             )
 
         def refresh_anchors(self) -> None:

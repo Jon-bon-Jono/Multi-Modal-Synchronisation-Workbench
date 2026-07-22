@@ -169,6 +169,22 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--subject", required=True)
     gui.add_argument("--mapping-version", required=True)
     gui.add_argument("--annotator-id", default="")
+    gui.add_argument(
+        "--pose-predictions",
+        default=None,
+        help=(
+            "Optional predictions.npz produced by mmfi_pose_quick.py. "
+            "Predictions are indexed by target_sample_index."
+        ),
+    )
+    gui.add_argument(
+        "--pose-prediction-array",
+        default="pred_globally_aligned",
+        help=(
+            "Pose array inside the prediction NPZ. Use pred_globally_aligned "
+            "for direct overlay in the radar/Kinect comparison frame."
+        ),
+    )
 
     return parser
 
@@ -383,8 +399,10 @@ def main(argv: list[str] | None = None) -> int:
                 subject_id=args.subject,
                 mapping_version_id=args.mapping_version,
                 annotator_id=args.annotator_id,
+                pose_predictions_path=args.pose_predictions,
+                pose_prediction_array=args.pose_prediction_array,
             )
-        except RuntimeError as exc:
+        except (RuntimeError, FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}")
             return 2
 

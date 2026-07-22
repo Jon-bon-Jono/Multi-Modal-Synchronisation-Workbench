@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from sync_workbench.experimental.anchoring_gui.prediction_overlay import MMFI17_EDGES
 from sync_workbench.experimental.anchoring_gui.visualization_utils import (
     KINECT_LIMB_INDEX_CONNECTIONS,
     SENSOR_HEIGHT_M,
@@ -10,6 +11,7 @@ from sync_workbench.experimental.anchoring_gui.visualization_utils import (
     point_rgba,
     points_sensor_to_world,
     pose3d_to_world,
+    sensor_xyz_to_world_xyz,
     valid_points,
 )
 
@@ -32,6 +34,7 @@ class PointCloudPanel:
                 self.color_mode = "constant"
                 self.filter_noise = False
                 self.show_pose3d = False
+                self.show_predicted_pose3d = False
                 self.pan_mode = False
 
                 self.scatter = gl.GLScatterPlotItem(pos=np.empty((0, 3)), size=5)
@@ -41,11 +44,18 @@ class PointCloudPanel:
                     color=(0.1, 0.5, 1.0, 1.0),
                 )
                 self.pose_lines: list[object] = []
+                self.predicted_pose_scatter = gl.GLScatterPlotItem(
+                    pos=np.empty((0, 3)),
+                    size=7,
+                    color=(1.0, 0.85, 0.1, 1.0),
+                )
+                self.predicted_pose_lines: list[object] = []
 
                 self._add_world_reference_items()
 
                 self.addItem(self.scatter)
                 self.addItem(self.pose_scatter)
+                self.addItem(self.predicted_pose_scatter)
 
                 # Reasonable initial view for floor/world coordinates.
                 try:
@@ -160,6 +170,7 @@ class PointCloudPanel:
                 color_mode: str | None = None,
                 filter_noise: bool | None = None,
                 show_pose3d: bool | None = None,
+                show_predicted_pose3d: bool | None = None,
             ) -> None:
                 if color_mode is not None:
                     self.color_mode = str(color_mode)
@@ -167,11 +178,19 @@ class PointCloudPanel:
                     self.filter_noise = bool(filter_noise)
                 if show_pose3d is not None:
                     self.show_pose3d = bool(show_pose3d)
+                if show_predicted_pose3d is not None:
+                    self.show_predicted_pose3d = bool(show_predicted_pose3d)
 
             def set_points(self, points: np.ndarray) -> None:
-                self.set_scene(points, pose3d=None)
+                self.set_scene(points, pose3d=None, predicted_pose3d=None)
 
-            def set_scene(self, points: np.ndarray | None, *, pose3d: np.ndarray | None = None) -> None:
+            def set_scene(
+                self,
+                points: np.ndarray | None,
+                *,
+                pose3d: np.ndarray | None = None,
+                predicted_pose3d: np.ndarray | None = None,
+            ) -> None:
                 pts = valid_points(points, filter_noise=self.filter_noise)
 
                 if pts.size == 0:
@@ -186,6 +205,9 @@ class PointCloudPanel:
 
                 self.scatter.setData(pos=pos, color=colors, size=5)
                 self._set_pose3d(pose3d if self.show_pose3d else None)
+                self._set_predicted_pose3d(
+                    predicted_pose3d if self.show_predicted_pose3d else None
+                )
 
             def _clear_pose_lines(self) -> None:
                 for item in self.pose_lines:
@@ -222,5 +244,67 @@ class PointCloudPanel:
                     )
                     self.addItem(item)
                     self.pose_lines.append(item)
+
+
+            def _clear_predicted_pose_lines(self) -> None:
+                for item in self.predicted_pose_lines:
+                    try:
+                        self.removeItem(item)
+                    except Exception:
+                        pass
+                self.predicted_pose_lines.clear()
+
+            def _set_predicted_pose3d(
+                self,
+                predicted_pose3d: np.ndarray | None,
+            ) -> None:
+                self._clear_predicted_pose_lines()
+
+                if predicted_pose3d is None:
+                    self.predicted_pose_scatter.setData(
+                        pos=np.empty((0, 3), dtype=float)
+                    )
+                    return
+
+                pose_sensor = np.asarray(predicted_pose3d, dtype=float)
+                if pose_sensor.size == 0:
+                    self.predicted_pose_scatter.setData(
+                        pos=np.empty((0, 3), dtype=float)
+                    )
+                    return
+                if pose_sensor.ndim == 2:
+                    pose_sensor = pose_sensor[None, ...]
+                if (
+                    pose_sensor.ndim != 3
+                    or pose_sensor.shape[1] != 17
+                    or pose_sensor.shape[2] < 3
+                ):
+                    raise ValueError(
+                        "Predicted pose must have shape [17,3] or [people,17,3], "
+                        f"got {pose_sensor.shape}"
+                    )
+
+                # Predictions selected from pred_globally_aligned are already in
+                # radar sensor xyz metres. Do not apply the Kinect axis swap again.
+                pose_world = sensor_xyz_to_world_xyz(pose_sensor[..., :3])
+                joints = pose_world.reshape(-1, 3)
+                finite = np.all(np.isfinite(joints), axis=1)
+                colour = (1.0, 0.85, 0.1, 1.0)
+
+                self.predicted_pose_scatter.setData(
+                    pos=joints[finite],
+                    color=colour,
+                    size=7,
+                )
+
+                for p0, p1 in finite_pose_limbs(pose_world, MMFI17_EDGES):
+                    item = gl.GLLinePlotItem(
+                        pos=np.vstack([p0, p1]),
+                        color=colour,
+                        width=2,
+                        antialias=True,
+                    )
+                    self.addItem(item)
+                    self.predicted_pose_lines.append(item)
 
         return _PointCloudPanel()

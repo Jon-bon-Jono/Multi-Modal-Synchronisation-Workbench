@@ -13,6 +13,10 @@ from sync_workbench.services.mapping_lookup_service import MappingLookupService
 from sync_workbench.services.payload_service import PayloadService
 from sync_workbench.services.video_frame_service import VideoFrameService
 from sync_workbench.storage.sqlite_store import SQLiteCoreStore
+from sync_workbench.experimental.anchoring_gui.prediction_overlay import (
+    PosePredictionFrame,
+    PosePredictionOverlay,
+)
 
 
 class AnchoringController:
@@ -25,6 +29,8 @@ class AnchoringController:
         subject_id: str,
         mapping_version_id: str,
         annotator_id: str = "",
+        pose_predictions_path: str | Path | None = None,
+        pose_prediction_array: str = "pred_globally_aligned",
     ):
         self.sqlite_path = Path(sqlite_path)
         self.subject_id = subject_id
@@ -37,6 +43,14 @@ class AnchoringController:
         self.assets = AssetService(sqlite_path, {"rgb": rgb_root, "artifact_store": artifact_root})
         self.video = VideoFrameService(self.assets)
         self.anchors = AnchorService(sqlite_path)
+        self.pose_predictions = (
+            PosePredictionOverlay(
+                pose_predictions_path,
+                pose_array=pose_prediction_array,
+            )
+            if pose_predictions_path
+            else None
+        )
         self._run_sample_bounds: dict[tuple[str, str], int] = {}
         self._nominal_fps: dict[tuple[str, str], float] = {}
         self._payload_cache: dict[tuple[str, str, int, str], Any] = {}
@@ -124,6 +138,23 @@ class AnchoringController:
 
     def get_target_points(self, target_sample_index: int):
         return self._cached_payload(self.target_run_id, self.target_device_type, target_sample_index, "radar_points")
+
+    @property
+    def has_pose_predictions(self) -> bool:
+        return self.pose_predictions is not None
+
+    def get_target_pose_prediction(
+        self,
+        target_sample_index: int,
+    ) -> PosePredictionFrame | None:
+        if self.pose_predictions is None:
+            return None
+        return self.pose_predictions.get(target_sample_index)
+
+    def pose_prediction_summary(self) -> dict[str, object] | None:
+        if self.pose_predictions is None:
+            return None
+        return self.pose_predictions.summary()
 
     def get_target_points_window(self, target_sample_index: int, radius: int = 0):
         """Return radar points from target_sample_index +/- radius frames.

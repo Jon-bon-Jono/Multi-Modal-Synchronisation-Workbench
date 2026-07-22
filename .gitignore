@@ -7,6 +7,7 @@ reports/
 canonical_export/
 versions/
 artifact_store/
+runs/
 
 # Database
 *.sqlite
