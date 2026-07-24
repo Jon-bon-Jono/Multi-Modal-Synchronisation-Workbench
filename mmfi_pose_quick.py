@@ -4,12 +4,14 @@
 This version uses:
 - the native 17-joint MM-Fi topology defined in MMFI17_NAMES;
 - corrected packed MM-Fi point order [x, y, z, Doppler, intensity];
-- centred odd-sized radar windows (default: five frames);
-- frame-balanced point sampling so each temporal frame contributes equally;
+- centred odd-sized radar windows (default: five 10 Hz samples spanning 0.4 s);
+- frame-balanced, permutation-invariant geometric point sampling;
+- masked padding instead of duplicated sparse-frame points;
 - configurable return-strength handling: none, window-robust, or window-rank;
 - one relative-time feature per point;
 - a point-token Transformer with learned joint queries and 3-axis SimCC;
-- pelvis-relative joint targets with an absolute pelvis token by default;
+- a robust radar-cloud anchor with anchor-relative pelvis and
+  pelvis-relative remaining-joint targets by default;
 - joint geometric augmentation applied consistently to radar points and pose;
 - fast SyncWB inference through cached run-level ragged-NPZ readers;
 - optional Kinect-to-radar rigid extrinsics for SyncWB evaluation;
@@ -19,28 +21,30 @@ This version uses:
 Recommended geometry + Doppler baseline:
     python mmfi_pose_quick.py train \
         --packed-root "D:/backup_data/MM-Fi/packed_data" \
-        --out runs/mmfi_pose_window5_xyz_doppler \
-        --split cross_subject \
+        --out runs/mmfi_pose_anchor_v4 \
+        --split cross_environment \
         --signal-mode none \
-        --target-mode pelvis_relative \
+        --spatial-mode cloud_anchor \
+        --target-mode cloud_anchor_relative \
         --epochs 25
 
 Return-strength ablation using domain-compatible within-window normalisation:
     python mmfi_pose_quick.py train \
         --packed-root "D:/backup_data/MM-Fi/packed_data" \
-        --out runs/mmfi_pose_window5_robust_signal \
+        --out runs/mmfi_pose_anchor_v4_robust_signal \
         --signal-mode robust \
-        --target-mode pelvis_relative \
+        --spatial-mode cloud_anchor \
+        --target-mode cloud_anchor_relative \
         --epochs 25
 
 Apply the checkpoint to one SyncWB mapping version:
     python mmfi_pose_quick.py infer-syncwb \
-        --checkpoint runs/mmfi_pose_window5_xyz_doppler/best.pt \
+        --checkpoint runs/mmfi_pose_anchor_v4/best.pt \
         --sqlite workbench.sqlite \
         --artifact-root artifact_store \
         --subject 19_MM \
         --mapping-version piecewise_rgb_to_pc_v001_map \
-        --out runs/subject_19_pose
+        --out runs/19_MM_mmfi_pose_anchor_v4
 
 Packed MM-Fi conversions:
     point cloud raw -> internal: [1, 0, 2, 4, 3]
@@ -143,8 +147,10 @@ MMFI_POINT_ORDER = np.asarray([1, 0, 2, 4, 3], dtype=np.int64)
 MMFI_POSE_ORDER = np.asarray([0, 2, 1], dtype=np.int64)
 NOISE_TARGET_IDS = {253.0, 254.0, 255.0}
 SIGNAL_MODES = ("none", "robust", "rank")
-TARGET_MODES = ("absolute", "pelvis_relative")
-SCRIPT_VERSION = "domain-gap-v3"
+SPATIAL_MODES = ("legacy", "cloud_anchor")
+TARGET_MODES = ("absolute", "pelvis_relative", "cloud_anchor_relative")
+SCRIPT_VERSION = "domain-gap-v4"
+MMFI_SAMPLE_PERIOD_SEC = 0.10
 
 
 def seed_everything(seed: int) -> None:
@@ -165,6 +171,7 @@ class PackedRecord:
     subject: str
     point_path: str
     pose_path: str
+    activity_path: str | None
     n_frames: int
 
 
@@ -172,6 +179,7 @@ class PackedRecord:
 class FeatureConfig:
     signal_mode: str = "none"
     doppler_limit_mps: float = 3.0
+    spatial_mode: str = "legacy"
 
     def __post_init__(self) -> None:
         if self.signal_mode not in SIGNAL_MODES:
@@ -180,11 +188,20 @@ class FeatureConfig:
             )
         if not np.isfinite(self.doppler_limit_mps) or self.doppler_limit_mps <= 0:
             raise ValueError("doppler_limit_mps must be finite and positive")
+        if self.spatial_mode not in SPATIAL_MODES:
+            raise ValueError(
+                f"spatial_mode must be one of {SPATIAL_MODES}, "
+                f"got {self.spatial_mode!r}"
+            )
 
     @property
     def input_dim(self) -> int:
-        # absolute xyz + centred xyz + Doppler + optional signal + relative time
-        return 8 + int(self.signal_mode != "none")
+        if self.spatial_mode == "legacy":
+            # absolute xyz + centred xyz + Doppler + optional signal + relative time
+            return 8 + int(self.signal_mode != "none")
+        # cloud-anchor-relative xyz + sensor range + Doppler + optional signal
+        # + relative time
+        return 6 + int(self.signal_mode != "none")
 
 
 @dataclass
@@ -213,6 +230,7 @@ def discover_packed_records(root: Path) -> list[PackedRecord]:
     for point_path in sorted(root.glob("*/S*/point_clouds.npy")):
         subject_dir = point_path.parent
         pose_path = subject_dir / "kpts.npy"
+        activity_path = subject_dir / "act_classes.npy"
         if not pose_path.exists():
             continue
 
@@ -230,6 +248,7 @@ def discover_packed_records(root: Path) -> list[PackedRecord]:
             subject=subject_dir.name,
             point_path=str(point_path),
             pose_path=str(pose_path),
+            activity_path=str(activity_path) if activity_path.exists() else None,
             n_frames=len(pc),
         ))
 
@@ -324,6 +343,176 @@ def stack_radar_window(frames: Sequence[np.ndarray]) -> np.ndarray:
     return np.concatenate(stacked, axis=0)
 
 
+def geometric_median(
+    xyz: np.ndarray,
+    *,
+    tolerance: float = 1e-5,
+    max_iterations: int = 64,
+) -> np.ndarray:
+    """Return a deterministic, permutation-invariant geometric median.
+
+    The Weiszfeld update is translation/rotation equivariant and has a 50%
+    breakdown point. It is used only as a cloud reference, not as an anatomical
+    pelvis estimate.
+    """
+    points = np.asarray(xyz, dtype=np.float64)
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if len(points) == 0:
+        raise ValueError("geometric_median requires at least one finite point")
+    if len(points) == 1:
+        return points[0].astype(np.float32)
+
+    estimate = np.median(points, axis=0)
+    for _ in range(max_iterations):
+        distances = np.linalg.norm(points - estimate, axis=1)
+        coincident = distances <= tolerance
+        if np.any(coincident):
+            candidate = points[np.flatnonzero(coincident)[0]]
+        else:
+            weights = 1.0 / np.maximum(distances, tolerance)
+            candidate = np.sum(points * weights[:, None], axis=0) / weights.sum()
+        if np.linalg.norm(candidate - estimate) <= tolerance:
+            estimate = candidate
+            break
+        estimate = candidate
+    return estimate.astype(np.float32)
+
+
+def robust_cloud_anchor(stacked_points: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
+    """Estimate the cloud position at the centre timestamp.
+
+    A geometric median is calculated independently for every non-empty frame.
+    A coordinate-wise Theil-Sen line is then fitted through those per-frame
+    anchors and evaluated at relative time zero. Equal per-frame treatment
+    prevents a dense frame from dominating the result.
+    """
+    p = np.asarray(stacked_points, dtype=np.float32)
+    if p.ndim != 2 or p.shape[1] < 6:
+        raise ValueError(f"Expected stacked points [points, >=6], got {p.shape}")
+
+    valid = point_valid_mask(p)
+    relative_times = np.unique(p[:, 5])
+    frame_times: list[float] = []
+    frame_anchors: list[np.ndarray] = []
+    frame_counts: list[int] = []
+    for relative_time in np.sort(relative_times):
+        frame = p[valid & np.isclose(p[:, 5], relative_time, atol=1e-6)]
+        if len(frame) == 0:
+            continue
+        frame_times.append(float(relative_time))
+        frame_anchors.append(geometric_median(frame[:, :3]))
+        frame_counts.append(int(len(frame)))
+
+    if not frame_anchors:
+        raise ValueError("Radar window contains no finite non-padding points")
+
+    times = np.asarray(frame_times, dtype=np.float64)
+    anchors = np.asarray(frame_anchors, dtype=np.float64)
+    centre = robust_anchor_from_frame_anchors(times, anchors)
+
+    centre_index = int(np.argmin(np.abs(times)))
+    diagnostics: dict[str, object] = {
+        "anchor": centre,
+        "frame_times": times.astype(np.float32),
+        "frame_counts": np.asarray(frame_counts, dtype=np.int64),
+        "valid_window_frames": int(len(frame_counts)),
+        "window_point_count": int(sum(frame_counts)),
+        "center_point_count": int(frame_counts[centre_index]),
+    }
+    return centre, diagnostics
+
+
+def robust_anchor_from_frame_anchors(
+    frame_times: np.ndarray,
+    frame_anchors: np.ndarray,
+) -> np.ndarray:
+    """Fit the robust t=0 trajectory once frame medians are available."""
+    times = np.asarray(frame_times, dtype=np.float64)
+    anchors = np.asarray(frame_anchors, dtype=np.float64)
+    valid = np.isfinite(times) & np.all(np.isfinite(anchors), axis=1)
+    times, anchors = times[valid], anchors[valid]
+    if len(anchors) == 0:
+        raise ValueError("At least one finite per-frame anchor is required")
+    if len(anchors) == 1:
+        centre = anchors[0]
+    else:
+        centre = np.empty(3, dtype=np.float64)
+        for axis in range(3):
+            slopes: list[float] = []
+            for left in range(len(times) - 1):
+                for right in range(left + 1, len(times)):
+                    delta = times[right] - times[left]
+                    if abs(delta) > 1e-12:
+                        slopes.append(
+                            float((anchors[right, axis] - anchors[left, axis]) / delta)
+                        )
+            slope = float(np.median(slopes)) if slopes else 0.0
+            centre[axis] = float(np.median(anchors[:, axis] - slope * times))
+    return centre.astype(np.float32)
+
+
+def radar_window_support(
+    stacked_points: np.ndarray,
+    window_size: int,
+) -> dict[str, object]:
+    """Count real points at each expected relative timestamp."""
+    p = np.asarray(stacked_points, dtype=np.float32)
+    if p.ndim != 2 or p.shape[1] < 6:
+        raise ValueError(f"Expected stacked points [points, >=6], got {p.shape}")
+    if window_size < 1 or window_size % 2 == 0:
+        raise ValueError("window_size must be a positive odd integer")
+
+    expected_times = np.linspace(-1.0, 1.0, window_size, dtype=np.float32)
+    valid = point_valid_mask(p)
+    frame_counts = np.asarray([
+        np.count_nonzero(valid & np.isclose(p[:, 5], relative_time, atol=1e-6))
+        for relative_time in expected_times
+    ], dtype=np.int64)
+    return {
+        "frame_counts": frame_counts,
+        "valid_window_frames": int(np.count_nonzero(frame_counts)),
+        "window_point_count": int(frame_counts.sum()),
+        "center_point_count": int(frame_counts[window_size // 2]),
+    }
+
+
+def _canonical_point_order(frame: np.ndarray) -> np.ndarray:
+    """Canonicalise identical point sets before deterministic geometric sampling."""
+    p = np.asarray(frame, dtype=np.float32)
+    # x is the primary key, then y/z/Doppler/signal/time. Equal rows are
+    # interchangeable, so their internal tie order cannot affect the output.
+    order = np.lexsort((
+        p[:, 5],
+        p[:, 4],
+        p[:, 3],
+        p[:, 2],
+        p[:, 1],
+        p[:, 0],
+    ))
+    return p[order]
+
+
+def _farthest_point_indices(frame: np.ndarray, count: int) -> np.ndarray:
+    """Deterministic XYZ farthest-point sampling after canonical ordering."""
+    p = _canonical_point_order(frame)
+    if count >= len(p):
+        return np.arange(len(p), dtype=np.int64)
+
+    xyz = p[:, :3].astype(np.float64)
+    centre = geometric_median(xyz).astype(np.float64)
+    start_distances = np.linalg.norm(xyz - centre, axis=1)
+    selected = np.empty(count, dtype=np.int64)
+    selected[0] = int(np.argmin(start_distances))
+    min_distance_sq = np.sum((xyz - xyz[selected[0]]) ** 2, axis=1)
+    min_distance_sq[selected[0]] = -1.0
+    for position in range(1, count):
+        selected[position] = int(np.argmax(min_distance_sq))
+        distance_sq = np.sum((xyz - xyz[selected[position]]) ** 2, axis=1)
+        min_distance_sq = np.minimum(min_distance_sq, distance_sq)
+        min_distance_sq[selected[: position + 1]] = -1.0
+    return selected
+
+
 def percentile_rank(values: np.ndarray) -> np.ndarray:
     """Average-tie percentile ranks mapped to [-1, 1], without SciPy."""
     x = np.asarray(values, dtype=np.float64).reshape(-1)
@@ -346,17 +535,20 @@ def percentile_rank(values: np.ndarray) -> np.ndarray:
 def robust_feature_normalize(
     points: np.ndarray,
     feature_config: FeatureConfig,
+    cloud_anchor: np.ndarray | None = None,
 ) -> np.ndarray:
     """Construct model features from a sampled radar window.
 
     Input columns:
         [x, y, z, Doppler, intensity/SNR, relative_time]
 
-    Always-emitted features (8):
-        absolute xyz / 4 m,
-        window-centred xyz / 2 m,
-        physically clipped Doppler / ``doppler_limit_mps``,
-        relative frame time.
+    ``legacy`` spatial features (8):
+        absolute xyz / 4 m, window-median-centred xyz / 2 m, clipped Doppler,
+        and relative frame time.
+
+    ``cloud_anchor`` spatial features (6):
+        robust-cloud-anchor-relative xyz / 2 m, physical sensor range / 4 m,
+        clipped Doppler, and relative frame time.
 
     Optional return-strength feature (1):
         ``robust``: within-window median/IQR, clipped to +/-5 IQR and /5;
@@ -376,9 +568,22 @@ def robust_feature_normalize(
     signal = p[:, 4]
     relative_time = p[:, 5]
 
-    centre = np.median(xyz[mask], axis=0) if np.any(mask) else np.zeros(3, dtype=np.float32)
+    if feature_config.spatial_mode == "cloud_anchor":
+        if cloud_anchor is None:
+            raise ValueError("cloud_anchor spatial features require a cloud anchor")
+        centre = np.asarray(cloud_anchor, dtype=np.float32)
+        if centre.shape != (3,) or not np.all(np.isfinite(centre)):
+            raise ValueError(f"Expected a finite cloud anchor [3], got {centre}")
+    else:
+        centre = (
+            np.median(xyz[mask], axis=0)
+            if np.any(mask)
+            else np.zeros(3, dtype=np.float32)
+        )
+
     absolute_xyz = np.clip(xyz / 4.0, -2.0, 2.0)
     centred_xyz = np.clip((xyz - centre) / 2.0, -2.0, 2.0)
+    sensor_range = np.clip(np.linalg.norm(xyz, axis=1) / 4.0, 0.0, 2.0)[:, None]
     doppler_n = (
         np.clip(
             doppler,
@@ -389,7 +594,10 @@ def robust_feature_normalize(
     )[:, None]
     time_n = np.clip(relative_time, -1.0, 1.0)[:, None]
 
-    parts = [absolute_xyz, centred_xyz, doppler_n]
+    if feature_config.spatial_mode == "legacy":
+        parts = [absolute_xyz, centred_xyz, doppler_n]
+    else:
+        parts = [centred_xyz, sensor_range, doppler_n]
     if feature_config.signal_mode == "robust":
         signal_n = np.zeros(len(p), dtype=np.float32)
         if np.any(mask):
@@ -443,9 +651,10 @@ def frame_balanced_sample(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sample an equal token budget from every temporal frame.
 
-    Sampling with replacement is used when a source frame contains fewer points
-    than its quota. This removes the strong source/target cue caused by MM-Fi
-    windows being padded while denser SyncWB windows were fully populated.
+    Sparse frames are padded with masked zero tokens rather than duplicated
+    points. Dense frames use random sampling during training and deterministic
+    geometric sampling during evaluation. Canonical ordering makes both paths
+    independent of the input array's arbitrary row order.
     """
     p = np.asarray(stacked_points, dtype=np.float32)
     if p.ndim != 2 or p.shape[1] < 6:
@@ -467,16 +676,27 @@ def frame_balanced_sample(
             sampled_masks.append(np.zeros(quota, dtype=bool))
             continue
 
-        replace = len(frame) < quota
-        if rng is None:
-            if replace:
-                ids = np.arange(quota, dtype=np.int64) % len(frame)
-            else:
-                ids = np.linspace(0, len(frame) - 1, quota, dtype=np.int64)
+        canonical = _canonical_point_order(frame)
+        if len(canonical) <= quota:
+            selected = canonical
         else:
-            ids = rng.choice(len(frame), size=quota, replace=replace)
-        sampled.append(frame[ids])
-        sampled_masks.append(np.ones(quota, dtype=bool))
+            if rng is None:
+                ids = _farthest_point_indices(canonical, quota)
+            else:
+                ids = rng.choice(len(canonical), size=quota, replace=False)
+            selected = canonical[ids]
+
+        pad = quota - len(selected)
+        if pad:
+            selected = np.concatenate([
+                selected,
+                np.zeros((pad, p.shape[1]), dtype=np.float32),
+            ], axis=0)
+        sampled.append(selected)
+        sampled_masks.append(np.concatenate([
+            np.ones(quota - pad, dtype=bool),
+            np.zeros(pad, dtype=bool),
+        ]))
 
     out = np.concatenate(sampled, axis=0)
     token_mask = np.concatenate(sampled_masks, axis=0)
@@ -501,6 +721,7 @@ def rotation_matrix_xyz(roll: float, pitch: float, yaw: float) -> np.ndarray:
 def augment_geometry(
     points: np.ndarray,
     pose: np.ndarray,
+    cloud_anchor: np.ndarray,
     rng: np.random.Generator,
     *,
     yaw_deg: float,
@@ -510,7 +731,7 @@ def augment_geometry(
     body_scale_min: float,
     body_scale_max: float,
     x_reflection_probability: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply one physically consistent geometric augmentation to points and pose.
 
     Rotation, reflection and body-scale are applied about the pelvis so the
@@ -520,6 +741,9 @@ def augment_geometry(
     """
     out_points = np.asarray(points, dtype=np.float32).copy()
     out_pose = np.asarray(pose, dtype=np.float32).copy()
+    out_anchor = np.asarray(cloud_anchor, dtype=np.float32).copy()
+    if out_anchor.shape != (3,):
+        raise ValueError(f"Expected cloud_anchor [3], got {out_anchor.shape}")
     valid = point_valid_mask(out_points)
     pelvis = out_pose[0, :3].copy()
 
@@ -530,6 +754,7 @@ def augment_geometry(
     scale = float(rng.uniform(body_scale_min, body_scale_max))
 
     out_pose[:, :3] = (out_pose[:, :3] - pelvis) * scale @ rotation.T + pelvis
+    out_anchor = (out_anchor - pelvis) * scale @ rotation.T + pelvis
     if np.any(valid):
         out_points[valid, :3] = (
             (out_points[valid, :3] - pelvis) * scale @ rotation.T + pelvis
@@ -537,18 +762,24 @@ def augment_geometry(
 
     if rng.random() < x_reflection_probability:
         out_pose[:, 0] = 2.0 * pelvis[0] - out_pose[:, 0]
+        out_anchor[0] = 2.0 * pelvis[0] - out_anchor[0]
         if np.any(valid):
             out_points[valid, 0] = 2.0 * pelvis[0] - out_points[valid, 0]
 
     translation_limit = np.asarray(translation_m, dtype=np.float32)
     translation = rng.uniform(-translation_limit, translation_limit).astype(np.float32)
     out_pose[:, :3] += translation
+    out_anchor += translation
     if np.any(valid):
         out_points[valid, :3] += translation
-    return out_points, out_pose
+    return out_points, out_pose, out_anchor
 
 
-def encode_pose_target(pose: np.ndarray, target_mode: str) -> np.ndarray:
+def encode_pose_target(
+    pose: np.ndarray,
+    target_mode: str,
+    cloud_anchor: np.ndarray | None = None,
+) -> np.ndarray:
     y = np.asarray(pose, dtype=np.float32)
     if y.shape[-2:] != (17, 3):
         raise ValueError(f"Expected pose [...,17,3], got {y.shape}")
@@ -559,21 +790,75 @@ def encode_pose_target(pose: np.ndarray, target_mode: str) -> np.ndarray:
         encoded[..., 1:, :] -= y[..., :1, :]
         # Joint 0 deliberately remains the absolute pelvis.
         return encoded
+    if target_mode == "cloud_anchor_relative":
+        if cloud_anchor is None:
+            raise ValueError("cloud_anchor_relative targets require a cloud anchor")
+        anchor = np.asarray(cloud_anchor, dtype=np.float32)
+        if anchor.shape != y.shape[:-2] + (3,):
+            raise ValueError(
+                f"Cloud anchor shape {anchor.shape} is incompatible with pose {y.shape}"
+            )
+        encoded = y.copy()
+        encoded[..., 0, :] -= anchor
+        encoded[..., 1:, :] -= y[..., :1, :]
+        return encoded
     raise ValueError(f"target_mode must be one of {TARGET_MODES}, got {target_mode!r}")
 
 
-def decode_pose_target(encoded: np.ndarray | torch.Tensor, target_mode: str):
+def decode_pose_target(
+    encoded: np.ndarray | torch.Tensor,
+    target_mode: str,
+    cloud_anchor: np.ndarray | torch.Tensor | None = None,
+):
     if target_mode == "absolute":
         return encoded
-    if target_mode != "pelvis_relative":
+    if target_mode not in {"pelvis_relative", "cloud_anchor_relative"}:
         raise ValueError(f"target_mode must be one of {TARGET_MODES}, got {target_mode!r}")
     if isinstance(encoded, torch.Tensor):
         pose = encoded.clone()
+        if target_mode == "cloud_anchor_relative":
+            if cloud_anchor is None:
+                raise ValueError("cloud_anchor_relative decoding requires a cloud anchor")
+            anchor = torch.as_tensor(
+                cloud_anchor,
+                dtype=pose.dtype,
+                device=pose.device,
+            )
+            pose[..., 0, :] = pose[..., 0, :] + anchor
         pose[..., 1:, :] = pose[..., 1:, :] + pose[..., :1, :]
         return pose
     pose = np.asarray(encoded).copy()
+    if target_mode == "cloud_anchor_relative":
+        if cloud_anchor is None:
+            raise ValueError("cloud_anchor_relative decoding requires a cloud anchor")
+        pose[..., 0, :] += np.asarray(cloud_anchor, dtype=pose.dtype)
     pose[..., 1:, :] += pose[..., :1, :]
     return pose
+
+
+def record_segments(record: PackedRecord) -> list[tuple[int, int]]:
+    """Return half-open contiguous activity segments for one packed subject."""
+    if record.activity_path is None:
+        return [(0, record.n_frames)]
+    activities = np.asarray(np.load(record.activity_path, mmap_mode="r"))
+    if activities.ndim != 1 or len(activities) != record.n_frames:
+        raise ValueError(
+            f"Unexpected activity array {activities.shape}: {record.activity_path}"
+        )
+    boundaries = np.flatnonzero(activities[1:] != activities[:-1]) + 1
+    starts = np.concatenate([[0], boundaries])
+    stops = np.concatenate([boundaries, [len(activities)]])
+    return [(int(start), int(stop)) for start, stop in zip(starts, stops)]
+
+
+def valid_record_centres(record: PackedRecord, window_size: int) -> np.ndarray:
+    half = window_size // 2
+    chunks = [
+        np.arange(start + half, stop - half, dtype=np.int64)
+        for start, stop in record_segments(record)
+        if stop - start >= window_size
+    ]
+    return np.concatenate(chunks) if chunks else np.empty(0, dtype=np.int64)
 
 
 def estimate_pose_bounds(
@@ -583,6 +868,7 @@ def estimate_pose_bounds(
     target_mode: str,
     translation_m: Sequence[float],
     body_scale_max: float,
+    window_size: int,
 ) -> PoseBounds:
     """Estimate per-joint SimCC bounds in encoded target space.
 
@@ -593,22 +879,52 @@ def estimate_pose_bounds(
     rng = np.random.default_rng(seed)
     total = sum(r.n_frames for r in records)
     samples: list[np.ndarray] = []
+    anchor_samples: list[np.ndarray] = []
 
     for record in records:
+        valid_centres = valid_record_centres(record, window_size)
+        if len(valid_centres) == 0:
+            continue
         n = max(1, int(round(max_frames * record.n_frames / total)))
-        n = min(n, record.n_frames)
-        ids = rng.choice(record.n_frames, size=n, replace=False)
-        pose = np.load(record.pose_path, mmap_mode="r")[ids]
-        pose = transform_mmfi_pose(pose)
-        pose = pose[np.all(np.isfinite(pose), axis=(1, 2))]
-        if len(pose):
+        n = min(n, len(valid_centres))
+        ids = rng.choice(valid_centres, size=n, replace=False)
+        poses_all = np.load(record.pose_path, mmap_mode="r")
+        points_all = (
+            np.load(record.point_path, mmap_mode="r")
+            if target_mode == "cloud_anchor_relative"
+            else None
+        )
+        half = window_size // 2
+        for centre_id in ids:
+            pose = transform_mmfi_pose(poses_all[int(centre_id)])
+            if not np.all(np.isfinite(pose)):
+                continue
+            if points_all is not None:
+                frames = [
+                    transform_mmfi_points(points_all[frame_id])
+                    for frame_id in range(int(centre_id) - half, int(centre_id) + half + 1)
+                ]
+                try:
+                    anchor, _ = robust_cloud_anchor(stack_radar_window(frames))
+                except ValueError:
+                    continue
+                anchor_samples.append(anchor)
             samples.append(pose)
 
     if not samples:
         raise ValueError("No finite MM-Fi pose values found")
 
-    poses = np.concatenate(samples, axis=0)
-    encoded = encode_pose_target(poses, target_mode)
+    poses = np.stack(samples).astype(np.float32)
+    anchors = (
+        np.stack(anchor_samples).astype(np.float32)
+        if target_mode == "cloud_anchor_relative"
+        else None
+    )
+    if target_mode == "cloud_anchor_relative" and (
+        anchors is None or len(anchors) != len(poses)
+    ):
+        raise RuntimeError("Pose/anchor sample count mismatch while estimating bounds")
+    encoded = encode_pose_target(poses, target_mode, anchors)
     low = np.percentile(encoded, 0.1, axis=0)
     high = np.percentile(encoded, 99.9, axis=0)
     margin = np.maximum(0.10 * (high - low), 0.05)
@@ -616,9 +932,20 @@ def estimate_pose_bounds(
     high += margin
 
     translation_limit = np.asarray(translation_m, dtype=np.float32)
-    if target_mode == "pelvis_relative":
-        low[0] -= translation_limit
-        high[0] += translation_limit
+    if target_mode in {"pelvis_relative", "cloud_anchor_relative"}:
+        if target_mode == "pelvis_relative":
+            low[0] -= translation_limit
+            high[0] += translation_limit
+        else:
+            root_offsets = poses[:, 0, :] - anchors
+            root_radius = max(
+                float(np.percentile(np.linalg.norm(root_offsets, axis=-1), 99.9))
+                * body_scale_max
+                * 1.10,
+                0.25,
+            )
+            low[0] = -root_radius
+            high[0] = root_radius
         relative = poses[:, 1:, :] - poses[:, :1, :]
         radii = np.percentile(np.linalg.norm(relative, axis=-1), 99.9, axis=0)
         radii = np.maximum(radii * body_scale_max * 1.10, 0.15)
@@ -640,7 +967,7 @@ def estimate_pose_bounds(
 
 
 class PackedMMFiDataset(Dataset):
-    """Centred sliding windows that never cross a packed-record boundary."""
+    """Centred sliding windows that never cross an activity boundary."""
 
     def __init__(
         self,
@@ -688,20 +1015,59 @@ class PackedMMFiDataset(Dataset):
         self.x_reflection_probability = float(x_reflection_probability)
         self.signal_dropout_probability = float(signal_dropout_probability)
         self.low, self.high = bounds.arrays()
+        # Shared storage lets persistent Windows DataLoader workers observe the
+        # parent process's epoch while retaining their per-frame anchor caches.
+        self._epoch_state = torch.zeros((), dtype=torch.int64).share_memory_()
 
-        for record in self.records:
-            if record.n_frames < self.window_size:
-                raise ValueError(
-                    f"{record.point_path} contains {record.n_frames} frames, "
-                    f"less than window_size={self.window_size}"
-                )
-
-        self.window_counts = [r.n_frames - self.window_size + 1 for r in self.records]
-        self.ends = np.cumsum(self.window_counts).tolist()
+        self.segments: list[tuple[int, int, np.ndarray]] = []
+        self.excluded_empty_or_invalid_windows = 0
+        for record_index, record in enumerate(self.records):
+            point_clouds = np.load(record.point_path, mmap_mode="r")
+            poses = np.load(record.pose_path, mmap_mode="r")
+            raw_xyz = np.asarray(point_clouds[..., :3])
+            frame_has_points = np.any(
+                np.all(np.isfinite(raw_xyz), axis=-1)
+                & (np.linalg.norm(raw_xyz, axis=-1) > 1e-8),
+                axis=1,
+            )
+            finite_pose = np.all(np.isfinite(poses), axis=(1, 2))
+            for segment_start, segment_stop in record_segments(record):
+                window_count = segment_stop - segment_start - self.window_size + 1
+                if window_count > 0:
+                    support_count = np.convolve(
+                        frame_has_points[segment_start:segment_stop].astype(np.int16),
+                        np.ones(self.window_size, dtype=np.int16),
+                        mode="valid",
+                    )
+                    centre_ids = (
+                        np.arange(window_count, dtype=np.int64)
+                        + segment_start
+                        + self.half_window
+                    )
+                    valid_offsets = np.flatnonzero(
+                        (support_count > 0) & finite_pose[centre_ids]
+                    ).astype(np.int64)
+                    self.excluded_empty_or_invalid_windows += int(
+                        window_count - len(valid_offsets)
+                    )
+                    if len(valid_offsets) == 0:
+                        continue
+                    self.segments.append((
+                        int(record_index),
+                        int(segment_start),
+                        valid_offsets,
+                    ))
+        if not self.segments:
+            raise ValueError("No activity segment is long enough for the requested window")
+        self.ends = np.cumsum([len(segment[2]) for segment in self.segments]).tolist()
         self._cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._frame_anchor_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     def __len__(self) -> int:
         return int(self.ends[-1])
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch_state.fill_(int(epoch))
 
     def _arrays(self, record_index: int) -> tuple[np.ndarray, np.ndarray]:
         if record_index not in self._cache:
@@ -712,10 +1078,37 @@ class PackedMMFiDataset(Dataset):
             )
         return self._cache[record_index]
 
+    def _cloud_anchor(
+        self,
+        record_index: int,
+        window_start: int,
+        frames: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        if record_index not in self._frame_anchor_cache:
+            n_frames = self.records[record_index].n_frames
+            self._frame_anchor_cache[record_index] = (
+                np.full((n_frames, 3), np.nan, dtype=np.float32),
+                np.zeros(n_frames, dtype=bool),
+            )
+        anchors, computed = self._frame_anchor_cache[record_index]
+        window_anchors = np.empty((self.window_size, 3), dtype=np.float32)
+        for offset, frame in enumerate(frames):
+            frame_index = window_start + offset
+            if not computed[frame_index]:
+                valid = point_valid_mask(frame)
+                if np.any(valid):
+                    anchors[frame_index] = geometric_median(frame[valid, :3])
+                computed[frame_index] = True
+            window_anchors[offset] = anchors[frame_index]
+        frame_times = np.linspace(-1.0, 1.0, self.window_size, dtype=np.float32)
+        return robust_anchor_from_frame_anchors(frame_times, window_anchors)
+
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | int]:
-        record_index = bisect.bisect_right(self.ends, int(index))
-        record_start = 0 if record_index == 0 else self.ends[record_index - 1]
-        window_start = int(index) - int(record_start)
+        segment_index = bisect.bisect_right(self.ends, int(index))
+        segment_dataset_start = 0 if segment_index == 0 else self.ends[segment_index - 1]
+        record_index, segment_start, valid_offsets = self.segments[segment_index]
+        local_index = int(index) - int(segment_dataset_start)
+        window_start = segment_start + int(valid_offsets[local_index])
         centre_frame = window_start + self.half_window
         window_end = window_start + self.window_size
 
@@ -726,12 +1119,18 @@ class PackedMMFiDataset(Dataset):
         ]
         points = stack_radar_window(frames)
         pose = transform_mmfi_pose(poses[centre_frame])
+        cloud_anchor = self._cloud_anchor(record_index, window_start, frames)
 
-        rng = np.random.default_rng(self.seed + int(index) * 104729)
+        rng = np.random.default_rng(
+            self.seed
+            + int(index) * 104729
+            + int(self._epoch_state.item()) * 1000003
+        )
         if self.training:
-            points, pose = augment_geometry(
+            points, pose, cloud_anchor = augment_geometry(
                 points,
                 pose,
+                cloud_anchor,
                 rng,
                 yaw_deg=self.yaw_aug_deg,
                 pitch_deg=self.pitch_aug_deg,
@@ -750,15 +1149,28 @@ class PackedMMFiDataset(Dataset):
                     0.0, 0.03, size=valid.sum()
                 ).astype(np.float32)
                 drop = rng.random(valid.sum()) < 0.08
+                if np.all(drop):
+                    # Sparse source windows must retain a real geometric
+                    # reference; masked padding is not a valid cloud anchor.
+                    drop[int(rng.integers(0, len(drop)))] = False
                 points[np.flatnonzero(valid)[drop]] = 0.0
 
+        anchor_diagnostics = radar_window_support(points, self.window_size)
         sampled, token_mask = frame_balanced_sample(
             points,
             self.num_points,
             self.window_size,
             rng if self.training else None,
         )
-        features = robust_feature_normalize(sampled, self.feature_config)
+        features = robust_feature_normalize(
+            sampled,
+            self.feature_config,
+            cloud_anchor=(
+                cloud_anchor
+                if self.feature_config.spatial_mode == "cloud_anchor"
+                else None
+            ),
+        )
         if (
             self.training
             and self.feature_config.signal_mode != "none"
@@ -767,7 +1179,15 @@ class PackedMMFiDataset(Dataset):
             # Signal is immediately before relative time in both signal modes.
             features[:, -2] = 0.0
 
-        encoded_pose = encode_pose_target(pose, self.target_mode)
+        encoded_pose = encode_pose_target(
+            pose,
+            self.target_mode,
+            cloud_anchor=(
+                cloud_anchor
+                if self.target_mode == "cloud_anchor_relative"
+                else None
+            ),
+        )
         normalized = np.clip(
             (encoded_pose - self.low) / (self.high - self.low),
             0.0,
@@ -780,6 +1200,9 @@ class PackedMMFiDataset(Dataset):
             "token_mask": torch.from_numpy(token_mask),
             "labels": torch.from_numpy(labels),
             "pose": torch.from_numpy(pose.astype(np.float32)),
+            "cloud_anchor": torch.from_numpy(cloud_anchor),
+            "window_point_count": int(anchor_diagnostics["window_point_count"]),
+            "center_point_count": int(anchor_diagnostics["center_point_count"]),
             "index": int(index),
             "centre_frame_index": int(centre_frame),
         }
@@ -791,6 +1214,14 @@ def cap_dataset(dataset: Dataset, maximum: int, seed: int) -> Dataset:
     rng = np.random.default_rng(seed)
     ids = np.sort(rng.choice(len(dataset), size=maximum, replace=False))
     return Subset(dataset, ids.tolist())
+
+
+def set_dataset_epoch(dataset: Dataset, epoch: int) -> None:
+    """Propagate augmentation epoch through a possible Subset wrapper."""
+    if isinstance(dataset, Subset):
+        set_dataset_epoch(dataset.dataset, epoch)
+    elif isinstance(dataset, PackedMMFiDataset):
+        dataset.set_epoch(epoch)
 
 
 # -----------------------------------------------------------------------------
@@ -880,6 +1311,7 @@ def decode_simcc(
     low: torch.Tensor,
     high: torch.Tensor,
     target_mode: str,
+    cloud_anchor: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode per-joint SimCC coordinates and reconstruct absolute pose."""
     if low.shape != (17, 3) or high.shape != (17, 3):
@@ -899,7 +1331,7 @@ def decode_simcc(
         axis_high = high[:, axis][None, :]
         coordinates.append(axis_low + unit * (axis_high - axis_low))
     encoded = torch.stack(coordinates, dim=-1)
-    return decode_pose_target(encoded, target_mode)
+    return decode_pose_target(encoded, target_mode, cloud_anchor)
 
 
 # -----------------------------------------------------------------------------
@@ -1063,13 +1495,14 @@ def evaluate_loader(
         points = batch["points"].to(device, non_blocking=True)
         token_mask = batch["token_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
+        cloud_anchor = batch["cloud_anchor"].to(device, non_blocking=True)
         with torch.autocast(
             device_type=device.type,
             enabled=amp and device.type == "cuda",
         ):
             logits = model(points, token_mask)
             loss = simcc_loss(logits, labels)
-            pred = decode_simcc(logits, low, high, target_mode)
+            pred = decode_simcc(logits, low, high, target_mode, cloud_anchor)
         losses.append(float(loss.item()))
         predictions.append(pred.float().cpu().numpy())
         targets.append(batch["pose"].numpy())
@@ -1102,6 +1535,8 @@ def make_loader(
         shuffle=shuffle,
         num_workers=workers,
         pin_memory=device.type == "cuda",
+        # Epoch state lives in shared memory, so persistent workers can retain
+        # expensive per-frame anchor caches without repeating augmentations.
         persistent_workers=workers > 0,
         drop_last=shuffle,
     )
@@ -1116,7 +1551,15 @@ def train_command(args: argparse.Namespace) -> None:
     feature_config = FeatureConfig(
         signal_mode=args.signal_mode,
         doppler_limit_mps=args.doppler_limit_mps,
+        spatial_mode=args.spatial_mode,
     )
+    if (
+        args.target_mode == "cloud_anchor_relative"
+        and feature_config.spatial_mode != "cloud_anchor"
+    ):
+        raise ValueError(
+            "cloud_anchor_relative targets require --spatial-mode cloud_anchor"
+        )
     if not (0.0 < args.body_scale_min <= args.body_scale_max):
         raise ValueError("Require 0 < body_scale_min <= body_scale_max")
     if not 0.0 <= args.x_reflection_probability <= 1.0:
@@ -1132,6 +1575,14 @@ def train_command(args: argparse.Namespace) -> None:
         raise ValueError("Translation augmentation limits must be non-negative")
     if any(v < 0 for v in (args.roll_aug_deg, args.pitch_aug_deg, args.yaw_aug_deg)):
         raise ValueError("Rotation augmentation limits must be non-negative")
+    if args.sample_period_sec <= 0:
+        raise ValueError("sample_period_sec must be positive")
+    if args.inference_min_center_points < 1 or args.inference_min_window_points < 1:
+        raise ValueError("Inference point-count defaults must be positive")
+    if not 1 <= args.inference_min_valid_window_frames <= args.window_size:
+        raise ValueError(
+            "inference_min_valid_window_frames must be between 1 and window_size"
+        )
 
     records = discover_packed_records(root)
     train_records, val_records, test_records = split_records(
@@ -1148,6 +1599,7 @@ def train_command(args: argparse.Namespace) -> None:
         args.target_mode,
         translation_aug_m,
         args.body_scale_max,
+        args.window_size,
     )
 
     preprocessing_contract = {
@@ -1157,6 +1609,14 @@ def train_command(args: argparse.Namespace) -> None:
         "mmfi_pose_order": MMFI_POSE_ORDER.tolist(),
         "feature_config": asdict(feature_config),
         "frame_balanced_sampling": True,
+        "sampling_strategy": "per_frame_masked_padding_random_train_fps_eval",
+        "activity_boundary_windows": True,
+        "sample_period_sec": args.sample_period_sec,
+        "cloud_anchor_algorithm": (
+            "per_frame_geometric_median_coordinate_theil_sen_at_t0"
+            if feature_config.spatial_mode == "cloud_anchor"
+            else None
+        ),
         "target_mode": args.target_mode,
         "translation_aug_m": list(translation_aug_m),
         "body_scale_range": [args.body_scale_min, args.body_scale_max],
@@ -1199,21 +1659,24 @@ def train_command(args: argparse.Namespace) -> None:
         x_reflection_probability=args.x_reflection_probability,
         signal_dropout_probability=args.signal_dropout_probability,
     )
-    train_ds: Dataset = PackedMMFiDataset(
+    train_base = PackedMMFiDataset(
         records=train_records,
         training=True,
         **dataset_kwargs,
     )
-    val_ds: Dataset = PackedMMFiDataset(
+    val_base = PackedMMFiDataset(
         records=val_records,
         training=False,
         **dataset_kwargs,
     )
-    test_ds: Dataset = PackedMMFiDataset(
+    test_base = PackedMMFiDataset(
         records=test_records,
         training=False,
         **dataset_kwargs,
     )
+    train_ds: Dataset = train_base
+    val_ds: Dataset = val_base
+    test_ds: Dataset = test_base
 
     train_ds = cap_dataset(train_ds, args.max_train_frames, args.seed)
     val_ds = cap_dataset(val_ds, args.max_val_frames, args.seed + 1)
@@ -1263,6 +1726,11 @@ def train_command(args: argparse.Namespace) -> None:
             "val": len(val_ds),
             "test": len(test_ds),
         },
+        "source_windows_excluded_empty_or_invalid": {
+            "train": train_base.excluded_empty_or_invalid_windows,
+            "val": val_base.excluded_empty_or_invalid_windows,
+            "test": test_base.excluded_empty_or_invalid_windows,
+        },
         "window_size": args.window_size,
         "num_points": args.num_points,
         "feature_config": asdict(feature_config),
@@ -1274,6 +1742,7 @@ def train_command(args: argparse.Namespace) -> None:
     }, indent=2))
 
     for epoch in range(1, args.epochs + 1):
+        set_dataset_epoch(train_ds, epoch)
         model.train()
         train_losses: list[float] = []
         iterator = tqdm(
@@ -1288,6 +1757,7 @@ def train_command(args: argparse.Namespace) -> None:
             token_mask = batch["token_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             target_pose = batch["pose"].to(device, non_blocking=True)
+            cloud_anchor = batch["cloud_anchor"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
@@ -1296,7 +1766,13 @@ def train_command(args: argparse.Namespace) -> None:
             ):
                 logits = model(points, token_mask)
                 loss = simcc_loss(logits, labels)
-                pred_pose = decode_simcc(logits, low, high, args.target_mode)
+                pred_pose = decode_simcc(
+                    logits,
+                    low,
+                    high,
+                    args.target_mode,
+                    cloud_anchor,
+                )
                 pred_bones = torch.stack([
                     pred_pose[:, b] - pred_pose[:, a]
                     for a, b in MMFI17_EDGES
@@ -1357,6 +1833,20 @@ def train_command(args: argparse.Namespace) -> None:
                 "target_mode": args.target_mode,
                 "feature_config": asdict(feature_config),
                 "frame_balanced_sampling": True,
+                "sampling_strategy": (
+                    "per_frame_masked_padding_random_train_fps_eval"
+                ),
+                "sample_period_sec": args.sample_period_sec,
+                "inference_quality_defaults": {
+                    "min_center_points": args.inference_min_center_points,
+                    "min_window_points": args.inference_min_window_points,
+                    "min_valid_window_frames": args.inference_min_valid_window_frames,
+                },
+                "inference_quality_default_provenance": (
+                    "Conservative MM-Fi lower-tail support defaults (the centre "
+                    "threshold is its per-frame p10) checked against 19_MM radar "
+                    "point-count diagnostics; no 19_MM pose labels were used."
+                ),
                 "window_size": args.window_size,
                 "num_points": args.num_points,
                 "mmfi_point_order": MMFI_POINT_ORDER.tolist(),
@@ -1460,27 +1950,32 @@ def predict_point_clouds(
     *,
     total: int | None = None,
     progress: bool = True,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     low_np, high_np = bounds.arrays()
     low = torch.tensor(low_np, device=device)
     high = torch.tensor(high_np, device=device)
     features: list[np.ndarray] = []
     masks: list[np.ndarray] = []
+    anchors: list[np.ndarray] = []
     outputs: list[np.ndarray] = []
+    output_anchors: list[np.ndarray] = []
 
     def flush() -> None:
         if not features:
             return
         x = torch.from_numpy(np.stack(features)).to(device)
         mask = torch.from_numpy(np.stack(masks)).to(device)
+        anchor = torch.from_numpy(np.stack(anchors)).to(device)
         with torch.autocast(
             device_type=device.type,
             enabled=amp and device.type == "cuda",
         ):
-            pred = decode_simcc(model(x, mask), low, high, target_mode)
+            pred = decode_simcc(model(x, mask), low, high, target_mode, anchor)
         outputs.append(pred.float().cpu().numpy())
+        output_anchors.append(anchor.float().cpu().numpy())
         features.clear()
         masks.clear()
+        anchors.clear()
 
     iterator = tqdm(
         point_clouds,
@@ -1490,21 +1985,34 @@ def predict_point_clouds(
         disable=not progress,
     )
     for points in iterator:
+        cloud_anchor, _ = robust_cloud_anchor(points)
         sampled, token_mask = frame_balanced_sample(
             np.asarray(points, dtype=np.float32),
             num_points,
             window_size,
             None,
         )
-        features.append(robust_feature_normalize(sampled, feature_config))
+        features.append(robust_feature_normalize(
+            sampled,
+            feature_config,
+            cloud_anchor=(
+                cloud_anchor
+                if feature_config.spatial_mode == "cloud_anchor"
+                else None
+            ),
+        ))
         masks.append(token_mask)
+        anchors.append(cloud_anchor)
         if len(features) >= batch_size:
             flush()
     flush()
 
     if not outputs:
-        return np.empty((0, 17, 3), dtype=np.float32)
-    return np.concatenate(outputs, axis=0)
+        return (
+            np.empty((0, 17, 3), dtype=np.float32),
+            np.empty((0, 3), dtype=np.float32),
+        )
+    return np.concatenate(outputs, axis=0), np.concatenate(output_anchors, axis=0)
 
 
 # -----------------------------------------------------------------------------
@@ -1750,6 +2258,26 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         if args.num_points is not None
         else int(checkpoint.get("num_points", 320))
     )
+    quality_defaults = checkpoint.get("inference_quality_defaults", {})
+    min_center_points = (
+        int(args.min_center_points)
+        if args.min_center_points is not None
+        else int(quality_defaults.get("min_center_points", 10))
+    )
+    min_window_points = (
+        int(args.min_window_points)
+        if args.min_window_points is not None
+        else int(quality_defaults.get("min_window_points", 64))
+    )
+    min_valid_window_frames = (
+        int(args.min_valid_window_frames)
+        if args.min_valid_window_frames is not None
+        else int(quality_defaults.get("min_valid_window_frames", 3))
+    )
+    if min_center_points < 1 or min_window_points < 1:
+        raise ValueError("Point-count inference thresholds must be positive")
+    if not 1 <= min_valid_window_frames <= window_size:
+        raise ValueError("min_valid_window_frames must be between 1 and window_size")
 
     store = SQLiteCoreStore(args.sqlite)
     mappings = store.read_table("SAMPLE_MAPPING")
@@ -1778,9 +2306,62 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
 
     sample_summary = store.read_table("SAMPLE_SUMMARY")
     rows = attach_source_num_people(rows, sample_summary)
+    primary_mapping_rows = int(len(rows))
+    people_numeric = pd.to_numeric(rows["num_people"], errors="coerce")
+    known_single_mask = people_numeric.eq(1)
+    excluded_multi_person_rows = int(people_numeric.gt(1).sum())
+    excluded_unknown_or_zero_person_rows = int(
+        (~known_single_mask & ~people_numeric.gt(1)).sum()
+    )
+    rows = rows.loc[known_single_mask].copy()
     if args.max_frames > 0:
         rows = rows.iloc[:args.max_frames]
     rows = rows.reset_index(drop=True)
+    if rows.empty:
+        raise ValueError(
+            "No primary mapping rows have SAMPLE_SUMMARY.num_people == 1"
+        )
+
+    device_runs = store.read_table("DEVICE_RUN")
+    if args.target_fps is not None:
+        target_fps = float(args.target_fps)
+        fps_source = "command_line"
+    else:
+        target_keys = rows[[
+            "subject_id",
+            "target_run_id",
+            "target_device_type",
+        ]].drop_duplicates()
+        run_fps: list[float] = []
+        for target_key in target_keys.itertuples(index=False):
+            matches = device_runs[
+                (device_runs["subject_id"].astype(str) == str(target_key.subject_id))
+                & (device_runs["run_id"].astype(str) == str(target_key.target_run_id))
+                & (
+                    device_runs["device_type"].astype(str)
+                    == str(target_key.target_device_type)
+                )
+            ]
+            values = pd.to_numeric(
+                matches.get("nominal_fps", pd.Series(dtype=float)),
+                errors="coerce",
+            ).dropna().unique()
+            run_fps.extend(float(value) for value in values if float(value) > 0)
+        unique_fps = sorted(set(run_fps))
+        if len(unique_fps) != 1:
+            raise ValueError(
+                "Could not derive one target nominal_fps from DEVICE_RUN; "
+                "supply --target-fps explicitly"
+            )
+        target_fps = unique_fps[0]
+        fps_source = "DEVICE_RUN.nominal_fps"
+    if target_fps <= 0:
+        raise ValueError("target_fps must be positive")
+    sample_period_sec = float(
+        checkpoint.get("sample_period_sec", MMFI_SAMPLE_PERIOD_SEC)
+    )
+    target_frame_stride = max(1, int(round(sample_period_sec * target_fps)))
+    target_offsets = np.arange(-half_window, half_window + 1) * target_frame_stride
 
     # Resolve the two run-level NPZ bundles once. The previous implementation
     # called per-sample payload lookup up to six times per mapped row. Each
@@ -1807,9 +2388,8 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         required_payloads,
     )
 
-    # Cache only unique source/target frames. With a five-frame sliding window,
-    # adjacent examples share four radar frames, so this reduces roughly
-    # 5 * mapping_rows reads to approximately the number of unique radar frames.
+    # Cache only unique source/target frames. Target offsets preserve the
+    # physical MM-Fi sample period rather than merely copying frame count.
     radar_requests: set[tuple[str, str, str, int]] = set()
     pose_requests: set[tuple[str, str, str, int]] = set()
     for row in rows.itertuples(index=False):
@@ -1817,10 +2397,8 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         target_run_id = str(row.target_run_id)
         target_device_type = str(row.target_device_type)
         target_centre = int(row.target_sample_index)
-        for target_index in range(
-            target_centre - half_window,
-            target_centre + half_window + 1,
-        ):
+        for target_offset in target_offsets:
+            target_index = target_centre + int(target_offset)
             if target_index >= 0:
                 radar_requests.add((
                     subject_id,
@@ -1876,6 +2454,11 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
     kept_rows: list[dict[str, object]] = []
     skipped = {
         "incomplete_radar_window": 0,
+        "too_few_center_points": 0,
+        "too_few_window_points": 0,
+        "too_few_valid_window_frames": 0,
+    }
+    unavailable_ground_truth = {
         "missing_pose_payload": 0,
         "invalid_pose": 0,
     }
@@ -1893,10 +2476,8 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         target_centre = int(row.target_sample_index)
 
         window_frames: list[np.ndarray] = []
-        for target_index in range(
-            target_centre - half_window,
-            target_centre + half_window + 1,
-        ):
+        for target_offset in target_offsets:
+            target_index = target_centre + int(target_offset)
             frame = radar_cache.get((
                 subject_id,
                 target_run_id,
@@ -1912,6 +2493,18 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
             skipped["incomplete_radar_window"] += 1
             continue
 
+        stacked_window = stack_radar_window(window_frames)
+        support = radar_window_support(stacked_window, window_size)
+        if int(support["center_point_count"]) < min_center_points:
+            skipped["too_few_center_points"] += 1
+            continue
+        if int(support["window_point_count"]) < min_window_points:
+            skipped["too_few_window_points"] += 1
+            continue
+        if int(support["valid_window_frames"]) < min_valid_window_frames:
+            skipped["too_few_valid_window_frames"] += 1
+            continue
+
         pose3d = pose_cache.get((
             subject_id,
             str(row.source_run_id),
@@ -1919,43 +2512,49 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
             int(row.source_sample_index),
         ))
         if pose3d is None:
-            skipped["missing_pose_payload"] += 1
-            continue
+            unavailable_ground_truth["missing_pose_payload"] += 1
+            gt = np.full((17, 3), np.nan, dtype=np.float32)
+            ground_truth_available = False
+        else:
+            converted_gt = kinect_pose32_to_radar_mmfi17(
+                pose3d,
+                args.person_index,
+                extrinsic_euler_deg=(
+                    args.kinect_to_radar_roll_deg,
+                    args.kinect_to_radar_pitch_deg,
+                    args.kinect_to_radar_yaw_deg,
+                ),
+                extrinsic_translation_m=(
+                    args.kinect_to_radar_tx_m,
+                    args.kinect_to_radar_ty_m,
+                    args.kinect_to_radar_tz_m,
+                ),
+            )
+            ground_truth_available = bool(
+                converted_gt is not None
+                and np.all(np.isfinite(converted_gt))
+            )
+            if ground_truth_available:
+                gt = np.asarray(converted_gt, dtype=np.float32)
+            else:
+                unavailable_ground_truth["invalid_pose"] += 1
+                gt = np.full((17, 3), np.nan, dtype=np.float32)
 
-        gt = kinect_pose32_to_radar_mmfi17(
-            pose3d,
-            args.person_index,
-            extrinsic_euler_deg=(
-                args.kinect_to_radar_roll_deg,
-                args.kinect_to_radar_pitch_deg,
-                args.kinect_to_radar_yaw_deg,
-            ),
-            extrinsic_translation_m=(
-                args.kinect_to_radar_tx_m,
-                args.kinect_to_radar_ty_m,
-                args.kinect_to_radar_tz_m,
-            ),
-        )
-        if gt is None or not np.all(np.isfinite(gt)):
-            skipped["invalid_pose"] += 1
-            continue
-
-        num_people = (
-            float(row.num_people)
-            if pd.notna(row.num_people)
-            else np.nan
-        )
-        metric_eligible = bool(np.isfinite(num_people) and int(num_people) == 1)
-
-        radar_windows.append(stack_radar_window(window_frames))
+        num_people = 1.0
+        radar_windows.append(stacked_window)
         gt_frames.append(gt)
         kept_rows.append({
             "source_sample_index": int(row.source_sample_index),
             "target_sample_index": target_centre,
-            "target_window_start": target_centre - half_window,
-            "target_window_end": target_centre + half_window,
+            "target_window_start": target_centre + int(target_offsets[0]),
+            "target_window_end": target_centre + int(target_offsets[-1]),
+            "target_frame_stride": target_frame_stride,
+            "center_point_count": int(support["center_point_count"]),
+            "window_point_count": int(support["window_point_count"]),
+            "valid_window_frames": int(support["valid_window_frames"]),
             "num_people": num_people,
-            "metric_eligible_single_person": metric_eligible,
+            "ground_truth_available": ground_truth_available,
+            "metric_eligible_single_person": ground_truth_available,
             "predicted_minus_estimated_ms": getattr(
                 row,
                 "predicted_minus_estimated_ms",
@@ -1964,9 +2563,11 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         })
 
     if not radar_windows:
-        raise ValueError("No mapped rows contained a complete radar window and valid pose3d")
+        raise ValueError(
+            "No known-single-person rows passed the radar-window quality policy"
+        )
 
-    pred = predict_point_clouds(
+    pred, cloud_anchors = predict_point_clouds(
         model=model,
         bounds=bounds,
         point_clouds=radar_windows,
@@ -1984,38 +2585,44 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
     pair_df = pd.DataFrame(kept_rows)
     metric_mask = pair_df["metric_eligible_single_person"].to_numpy(dtype=bool)
 
-    if metric_mask.sum() == 0:
-        raise ValueError(
-            "No valid predictions had SAMPLE_SUMMARY.num_people == 1; "
-            "SyncWB evaluation metrics cannot be reported"
-        )
-
     single_indices = np.flatnonzero(metric_mask)
-    requested_calibration = max(
-        1,
-        int(round(len(single_indices) * args.calibration_fraction)),
-    )
-    if len(single_indices) >= 11:
-        n_calibration = min(max(10, requested_calibration), len(single_indices) - 1)
-    else:
-        n_calibration = max(1, len(single_indices) - 1)
-
-    calibration_indices = single_indices[:n_calibration]
-    evaluation_indices = single_indices[n_calibration:]
-    if len(evaluation_indices) == 0:
-        warnings.warn(
-            "Too few single-person frames for held-out aligned evaluation; "
-            "using all single-person frames for aligned metrics.",
-            RuntimeWarning,
+    if len(single_indices) > 0:
+        requested_calibration = max(
+            1,
+            int(round(len(single_indices) * args.calibration_fraction)),
         )
-        evaluation_indices = single_indices
+        if len(single_indices) >= 11:
+            n_calibration = min(
+                max(10, requested_calibration),
+                len(single_indices) - 1,
+            )
+        else:
+            n_calibration = max(1, len(single_indices) - 1)
 
-    transform = fit_global_similarity(
-        pred[calibration_indices],
-        gt[calibration_indices],
-        joint_indices=BODY15_INDICES,
-    )
-    pred_global = apply_global_similarity(pred, transform)
+        calibration_indices = single_indices[:n_calibration]
+        evaluation_indices = single_indices[n_calibration:]
+        if len(evaluation_indices) == 0:
+            warnings.warn(
+                "Too few ground-truth frames for held-out aligned evaluation; "
+                "using all eligible frames for aligned metrics.",
+                RuntimeWarning,
+            )
+            evaluation_indices = single_indices
+        transform = fit_global_similarity(
+            pred[calibration_indices],
+            gt[calibration_indices],
+            joint_indices=BODY15_INDICES,
+        )
+        pred_global = apply_global_similarity(pred, transform)
+    else:
+        calibration_indices = np.empty(0, dtype=np.int64)
+        evaluation_indices = np.empty(0, dtype=np.int64)
+        transform = (
+            1.0,
+            np.eye(3, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+        )
+        pred_global = pred.copy()
 
     heldout_mask = np.zeros(len(pair_df), dtype=bool)
     heldout_mask[evaluation_indices] = True
@@ -2027,7 +2634,30 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
             "feature_config": asdict(feature_config),
             "target_mode": target_mode,
             "frame_balanced_sampling": checkpoint.get("frame_balanced_sampling"),
+            "sampling_strategy": checkpoint.get("sampling_strategy"),
+            "sample_period_sec": sample_period_sec,
             "mmfi_point_order": checkpoint.get("mmfi_point_order"),
+        },
+        "syncwb_radar_window": {
+            "target_fps": target_fps,
+            "target_fps_source": fps_source,
+            "target_frame_stride": target_frame_stride,
+            "effective_sample_period_sec": target_frame_stride / target_fps,
+            "window_span_sec": (
+                (window_size - 1) * target_frame_stride / target_fps
+            ),
+            "minimum_center_points": min_center_points,
+            "minimum_window_points": min_window_points,
+            "minimum_valid_window_frames": min_valid_window_frames,
+            "quality_default_provenance": checkpoint.get(
+                "inference_quality_default_provenance",
+                (
+                    "Conservative MM-Fi lower-tail support defaults (the centre "
+                    "threshold is its per-frame p10) checked against 19_MM radar "
+                    "point-count diagnostics; no 19_MM pose labels were used "
+                    "(explicit checkpoint field absent)."
+                ),
+            ),
         },
         "kinect_to_radar_extrinsic_used_for_ground_truth": {
             "euler_xyz_deg": [
@@ -2046,23 +2676,27 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
             ),
         },
         "counts": {
-            "primary_mapping_rows_considered": int(len(rows)),
+            "primary_mapping_rows_considered": primary_mapping_rows,
+            "known_single_person_rows_considered": int(len(rows)),
             "valid_predictions_saved": int(len(pred)),
             "single_person_metric_frames": int(metric_mask.sum()),
-            "excluded_non_single_person_predictions": int((~metric_mask).sum()),
-            "excluded_multi_person_predictions": int(
-                (pd.to_numeric(pair_df["num_people"], errors="coerce") > 1).sum()
+            "predictions_without_ground_truth": int((~metric_mask).sum()),
+            "excluded_non_single_person_before_inference": (
+                excluded_multi_person_rows + excluded_unknown_or_zero_person_rows
             ),
-            "excluded_unknown_or_zero_person_predictions": int(
-                (
-                    ~pd.to_numeric(pair_df["num_people"], errors="coerce").eq(1)
-                    & ~pd.to_numeric(pair_df["num_people"], errors="coerce").gt(1)
-                ).sum()
+            "excluded_multi_person_before_inference": excluded_multi_person_rows,
+            "excluded_unknown_or_zero_person_before_inference": (
+                excluded_unknown_or_zero_person_rows
             ),
             **{f"skipped_{key}": int(value) for key, value in skipped.items()},
+            **{
+                f"ground_truth_unavailable_{key}": int(value)
+                for key, value in unavailable_ground_truth.items()
+            },
         },
         "evaluation_policy": {
             "syncwb_metrics_require_num_people_equal_to": 1,
+            "predictions_do_not_require_kinect_ground_truth": True,
             "full17_face_head_joints_are_provisional": [9, 10],
             "global_similarity_fit_joint_set": "body15",
             "global_similarity_calibration_frames": int(len(calibration_indices)),
@@ -2093,12 +2727,14 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
     np.savez_compressed(
         out / "predictions.npz",
         pred=pred,
+        cloud_anchor=cloud_anchors,
         pred_globally_aligned=pred_global,
         target=gt,
         source_sample_index=pair_df["source_sample_index"].to_numpy(),
         target_sample_index=pair_df["target_sample_index"].to_numpy(),
         num_people=pair_df["num_people"].to_numpy(),
         metric_eligible_single_person=metric_mask,
+        ground_truth_available=pair_df["ground_truth_available"].to_numpy(dtype=bool),
         globally_aligned_heldout_mask=heldout_mask,
         joint_names=np.asarray(MMFI17_NAMES),
         global_scale=np.asarray(transform[0]),
@@ -2106,6 +2742,13 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
         global_translation=transform[2],
         signal_mode=np.asarray(feature_config.signal_mode),
         target_mode=np.asarray(target_mode),
+        spatial_mode=np.asarray(feature_config.spatial_mode),
+        target_fps=np.asarray(target_fps),
+        target_frame_stride=np.asarray(target_frame_stride),
+        sample_period_sec=np.asarray(sample_period_sec),
+        center_point_count=pair_df["center_point_count"].to_numpy(),
+        window_point_count=pair_df["window_point_count"].to_numpy(),
+        valid_window_frames=pair_df["valid_window_frames"].to_numpy(),
         kinect_to_radar_euler_xyz_deg=np.asarray([
             args.kinect_to_radar_roll_deg,
             args.kinect_to_radar_pitch_deg,
@@ -2149,20 +2792,55 @@ def self_test_command(_: argparse.Namespace) -> None:
     sampled, token_mask = frame_balanced_sample(stacked, 25, 5, np.random.default_rng(3))
     unique_times, time_counts = np.unique(sampled[token_mask, 5], return_counts=True)
     np.testing.assert_allclose(unique_times, [-1.0, -0.5, 0.0, 0.5, 1.0])
-    np.testing.assert_array_equal(time_counts, [5, 5, 5, 5, 5])
+    np.testing.assert_array_equal(time_counts, [3, 5, 2, 5, 4])
+    permuted = stacked[np.random.default_rng(41).permutation(len(stacked))]
+    sampled_permuted, mask_permuted = frame_balanced_sample(
+        permuted, 25, 5, np.random.default_rng(3)
+    )
+    np.testing.assert_array_equal(token_mask, mask_permuted)
+    np.testing.assert_allclose(sampled, sampled_permuted, atol=0.0)
+    eval_sampled, eval_mask = frame_balanced_sample(stacked, 25, 5, None)
+    eval_permuted, eval_permuted_mask = frame_balanced_sample(permuted, 25, 5, None)
+    np.testing.assert_array_equal(eval_mask, eval_permuted_mask)
+    np.testing.assert_allclose(eval_sampled, eval_permuted, atol=0.0)
     results["frame_balanced_temporal_sampling"] = True
+    results["permutation_invariant_sampling"] = True
 
-    for signal_mode, expected_dim in (("none", 8), ("robust", 9), ("rank", 9)):
-        config = FeatureConfig(signal_mode=signal_mode, doppler_limit_mps=3.0)
-        features = robust_feature_normalize(sampled, config)
-        assert features.shape == (25, expected_dim)
-        assert np.max(np.abs(features[:, 6])) <= 1.0 + 1e-6
-        if signal_mode != "none":
-            affine = sampled.copy()
-            affine[:, 4] = affine[:, 4] * 7.0 + 13.0
-            affine_features = robust_feature_normalize(affine, config)
-            np.testing.assert_allclose(features[:, -2], affine_features[:, -2], atol=1e-5)
+    cloud_anchor, anchor_diagnostics = robust_cloud_anchor(stacked)
+    support = radar_window_support(stacked, 5)
+    assert anchor_diagnostics["valid_window_frames"] == 5
+    assert support["center_point_count"] == 2
+    for spatial_mode, base_dim in (("legacy", 8), ("cloud_anchor", 6)):
+        for signal_mode in SIGNAL_MODES:
+            expected_dim = base_dim + int(signal_mode != "none")
+            config = FeatureConfig(
+                signal_mode=signal_mode,
+                doppler_limit_mps=3.0,
+                spatial_mode=spatial_mode,
+            )
+            features = robust_feature_normalize(
+                sampled,
+                config,
+                cloud_anchor=cloud_anchor if spatial_mode == "cloud_anchor" else None,
+            )
+            assert features.shape == (25, expected_dim)
+            doppler_index = 4 if spatial_mode == "cloud_anchor" else 6
+            assert np.max(np.abs(features[:, doppler_index])) <= 1.0 + 1e-6
+            if signal_mode != "none":
+                affine = sampled.copy()
+                affine[:, 4] = affine[:, 4] * 7.0 + 13.0
+                affine_features = robust_feature_normalize(
+                    affine,
+                    config,
+                    cloud_anchor=(
+                        cloud_anchor if spatial_mode == "cloud_anchor" else None
+                    ),
+                )
+                np.testing.assert_allclose(
+                    features[:, -2], affine_features[:, -2], atol=1e-5
+                )
     results["signal_modes_and_affine_compatibility"] = True
+    results["robust_cloud_anchor_and_support"] = True
 
     pose = np.zeros((17, 3), dtype=np.float32)
     pose[0] = [0.2, 3.0, 0.1]
@@ -2170,8 +2848,13 @@ def self_test_command(_: argparse.Namespace) -> None:
         [0.2, 0.1, 0.3], dtype=np.float32
     )
     for target_mode in TARGET_MODES:
-        encoded = encode_pose_target(pose, target_mode)
-        decoded = decode_pose_target(encoded, target_mode)
+        target_anchor = (
+            np.asarray([0.1, 2.8, -0.1], dtype=np.float32)
+            if target_mode == "cloud_anchor_relative"
+            else None
+        )
+        encoded = encode_pose_target(pose, target_mode, target_anchor)
+        decoded = decode_pose_target(encoded, target_mode, target_anchor)
         np.testing.assert_allclose(decoded, pose, atol=1e-6)
     results["pose_target_round_trip"] = True
 
@@ -2179,34 +2862,49 @@ def self_test_command(_: argparse.Namespace) -> None:
     high = np.full((17, 3), 5.0, dtype=np.float32)
     bounds = PoseBounds(low.tolist(), high.tolist())
     device = torch.device("cpu")
-    for signal_mode in SIGNAL_MODES:
-        feature_config = FeatureConfig(signal_mode=signal_mode)
-        model_config = {
-            "input_dim": feature_config.input_dim,
-            "joints": 17,
-            "bins": 16,
-            "dim": 32,
-            "heads": 4,
-            "encoder_layers": 1,
-            "decoder_layers": 1,
-            "dropout": 0.0,
-        }
-        model = PointQuerySimCC(**model_config).eval()
-        x = torch.zeros((2, 25, feature_config.input_dim), dtype=torch.float32)
-        mask = torch.ones((2, 25), dtype=torch.bool)
-        with torch.no_grad():
-            logits = model(x, mask)
-            assert all(axis.shape == (2, 17, 16) for axis in logits)
-            decoded = decode_simcc(
-                logits,
-                torch.tensor(low),
-                torch.tensor(high),
-                "pelvis_relative",
+    for spatial_mode in SPATIAL_MODES:
+        for signal_mode in SIGNAL_MODES:
+            feature_config = FeatureConfig(
+                signal_mode=signal_mode,
+                spatial_mode=spatial_mode,
             )
-            assert decoded.shape == (2, 17, 3)
+            model_config = {
+                "input_dim": feature_config.input_dim,
+                "joints": 17,
+                "bins": 16,
+                "dim": 32,
+                "heads": 4,
+                "encoder_layers": 1,
+                "decoder_layers": 1,
+                "dropout": 0.0,
+            }
+            model = PointQuerySimCC(**model_config).eval()
+            x = torch.zeros((2, 25, feature_config.input_dim), dtype=torch.float32)
+            mask = torch.ones((2, 25), dtype=torch.bool)
+            with torch.no_grad():
+                logits = model(x, mask)
+                assert all(axis.shape == (2, 17, 16) for axis in logits)
+                decode_mode = (
+                    "cloud_anchor_relative"
+                    if spatial_mode == "cloud_anchor"
+                    else "pelvis_relative"
+                )
+                anchors = (
+                    torch.zeros((2, 3))
+                    if decode_mode == "cloud_anchor_relative"
+                    else None
+                )
+                decoded = decode_simcc(
+                    logits,
+                    torch.tensor(low),
+                    torch.tensor(high),
+                    decode_mode,
+                    anchors,
+                )
+                assert decoded.shape == (2, 17, 3)
     results["model_forward_all_signal_modes"] = True
 
-    feature_config = FeatureConfig(signal_mode="none")
+    feature_config = FeatureConfig(signal_mode="none", spatial_mode="cloud_anchor")
     model_config = {
         "input_dim": feature_config.input_dim,
         "joints": 17,
@@ -2225,7 +2923,7 @@ def self_test_command(_: argparse.Namespace) -> None:
             "model": model.state_dict(),
             "model_config": model_config,
             "pose_bounds": asdict(bounds),
-            "target_mode": "pelvis_relative",
+            "target_mode": "cloud_anchor_relative",
             "feature_config": asdict(feature_config),
             "frame_balanced_sampling": True,
             "window_size": 5,
@@ -2240,7 +2938,7 @@ def self_test_command(_: argparse.Namespace) -> None:
         assert isinstance(loaded_model, PointQuerySimCC)
         assert loaded_bounds.arrays()[0].shape == (17, 3)
         assert loaded_features == feature_config
-        assert loaded_target_mode == "pelvis_relative"
+        assert loaded_target_mode == "cloud_anchor_relative"
     results["checkpoint_contract_round_trip"] = True
 
     pose32 = np.zeros((1, 32, 3), dtype=np.float32)
@@ -2278,7 +2976,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     train.add_argument("--packed-root", required=True)
-    train.add_argument("--out", default="runs/mmfi_pose_window5")
+    train.add_argument("--out", default="runs/mmfi_pose_anchor_v4")
     train.add_argument(
         "--split",
         choices=["cross_subject", "cross_environment"],
@@ -2296,6 +2994,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--num-points", type=int, default=250)
     train.add_argument("--window-size", type=int, default=5)
     train.add_argument(
+        "--sample-period-sec",
+        type=float,
+        default=MMFI_SAMPLE_PERIOD_SEC,
+        help="Physical time between adjacent source frames represented by the window",
+    )
+    train.add_argument(
         "--signal-mode",
         choices=SIGNAL_MODES,
         default="none",
@@ -2311,10 +3015,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Clip physical Doppler to +/- this value, then scale to [-1,1]",
     )
     train.add_argument(
+        "--spatial-mode",
+        choices=SPATIAL_MODES,
+        default="cloud_anchor",
+        help=(
+            "cloud_anchor uses robust-anchor-relative xyz plus physical range; "
+            "legacy preserves the earlier absolute+median-centred features"
+        ),
+    )
+    train.add_argument(
         "--target-mode",
         choices=TARGET_MODES,
-        default="pelvis_relative",
-        help="Default predicts an absolute pelvis plus pelvis-relative remaining joints",
+        default="cloud_anchor_relative",
+        help=(
+            "Default predicts pelvis relative to the robust cloud anchor and "
+            "the remaining joints relative to pelvis"
+        ),
     )
     train.add_argument("--yaw-aug-deg", type=float, default=15.0)
     train.add_argument(
@@ -2350,6 +3066,9 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--max-train-frames", type=int, default=0)
     train.add_argument("--max-val-frames", type=int, default=30000)
     train.add_argument("--max-test-frames", type=int, default=30000)
+    train.add_argument("--inference-min-center-points", type=int, default=10)
+    train.add_argument("--inference-min-window-points", type=int, default=64)
+    train.add_argument("--inference-min-valid-window-frames", type=int, default=3)
     train.add_argument("--seed", type=int, default=7)
     train.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     train.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
@@ -2389,6 +3108,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Omitted uses the checkpoint training value",
+    )
+    infer.add_argument(
+        "--target-fps",
+        type=float,
+        default=None,
+        help="Override target radar FPS; omitted reads DEVICE_RUN.nominal_fps",
+    )
+    infer.add_argument(
+        "--min-center-points",
+        type=int,
+        default=None,
+        help="Omitted uses the source-training checkpoint default",
+    )
+    infer.add_argument(
+        "--min-window-points",
+        type=int,
+        default=None,
+        help="Omitted uses the source-training checkpoint default",
+    )
+    infer.add_argument(
+        "--min-valid-window-frames",
+        type=int,
+        default=None,
+        help="Omitted uses the source-training checkpoint default",
     )
     infer.add_argument("--batch-size", type=int, default=256)
     infer.add_argument("--max-frames", type=int, default=0)
