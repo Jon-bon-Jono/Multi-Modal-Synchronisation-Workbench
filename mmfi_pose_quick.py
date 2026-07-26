@@ -46,6 +46,24 @@ Apply the checkpoint to one SyncWB mapping version:
         --mapping-version piecewise_rgb_to_pc_v001_map \
         --out runs/19_MM_mmfi_pose_anchor_v4
 
+Supervised fine-tuning on all selected subject runs/mapping versions:
+    python mmfi_pose_quick.py finetune-syncwb \
+        --checkpoint runs/mmfi_pose_anchor_v4/best.pt \
+        --sqlite workbench.sqlite \
+        --artifact-root artifact_store \
+        --subjects 07_SW \
+        --mapping-methods initial_nearest_for_anchoring \
+        --out runs/mmfi_pose_anchor_v4_finetuned_07_SW
+
+Inference/testing on all selected subject runs/mapping versions:
+    python mmfi_pose_quick.py infer-syncwb-all \
+        --checkpoint runs/mmfi_pose_anchor_v4_finetuned_07_SW/best.pt \
+        --sqlite workbench.sqlite \
+        --artifact-root artifact_store \
+        --subjects 19_MM \
+        --mapping-methods nearest_predicted_time \
+        --out runs/19_MM_mmfi_pose_anchor_v4_finetuned_07_SW
+
 Packed MM-Fi conversions:
     point cloud raw -> internal: [1, 0, 2, 4, 3]
     internal point columns:       [x, y, z, Doppler, intensity]
@@ -67,6 +85,7 @@ import bisect
 import json
 import math
 import random
+import re
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -150,6 +169,7 @@ SIGNAL_MODES = ("none", "robust", "rank")
 SPATIAL_MODES = ("legacy", "cloud_anchor")
 TARGET_MODES = ("absolute", "pelvis_relative", "cloud_anchor_relative")
 SCRIPT_VERSION = "domain-gap-v4"
+SYNCWB_FINETUNE_VERSION = "syncwb-supervised-finetune-v1"
 MMFI_SAMPLE_PERIOD_SEC = 0.10
 
 
@@ -1220,7 +1240,7 @@ def set_dataset_epoch(dataset: Dataset, epoch: int) -> None:
     """Propagate augmentation epoch through a possible Subset wrapper."""
     if isinstance(dataset, Subset):
         set_dataset_epoch(dataset.dataset, epoch)
-    elif isinstance(dataset, PackedMMFiDataset):
+    elif hasattr(dataset, "set_epoch"):
         dataset.set_epoch(epoch)
 
 
@@ -2233,6 +2253,1071 @@ def open_syncwb_ragged_readers(
 
     return readers
 
+
+def select_syncwb_mapping_versions(
+    store: object,
+    subjects: Sequence[str],
+    mapping_methods: Sequence[str],
+) -> pd.DataFrame:
+    """Select every mapping version matching a subject/method allow-list."""
+    subject_values = list(dict.fromkeys(str(value) for value in subjects))
+    method_values = list(dict.fromkeys(str(value) for value in mapping_methods))
+    if not subject_values:
+        raise ValueError("At least one SyncWB subject is required")
+    if not method_values:
+        raise ValueError("At least one SyncWB mapping method is required")
+
+    versions = store.read_table("MAPPING_VERSION")
+    required = {
+        "subject_id",
+        "mapping_version_id",
+        "source_run_id",
+        "source_device_type",
+        "target_run_id",
+        "target_device_type",
+        "mapping_method",
+    }
+    if versions.empty or not required.issubset(versions.columns):
+        raise ValueError(
+            "MAPPING_VERSION is empty or missing columns required for selection"
+        )
+    selected = versions[
+        versions["subject_id"].astype(str).isin(subject_values)
+        & versions["mapping_method"].astype(str).isin(method_values)
+    ].copy()
+    if selected.empty:
+        available = (
+            versions[versions["subject_id"].astype(str).isin(subject_values)]
+            [["subject_id", "mapping_method"]]
+            .drop_duplicates()
+            .sort_values(["subject_id", "mapping_method"])
+            .to_dict("records")
+        )
+        raise ValueError(
+            "No MAPPING_VERSION rows matched the requested subjects and methods. "
+            f"Available for those subjects: {available}"
+        )
+    for column in required:
+        selected[column] = selected[column].astype(str)
+    return selected.sort_values(
+        ["subject_id", "mapping_version_id"]
+    ).reset_index(drop=True)
+
+
+def primary_rows_for_mapping_versions(
+    store: object,
+    versions: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Load primary mappings and enforce known-single-person source frames."""
+    mappings = store.read_table("SAMPLE_MAPPING")
+    keys = versions[[
+        "subject_id",
+        "mapping_version_id",
+        "mapping_method",
+    ]].drop_duplicates()
+    rows = mappings.merge(
+        keys,
+        on=["subject_id", "mapping_version_id"],
+        how="inner",
+        validate="many_to_one",
+    )
+    if "is_primary" in rows.columns:
+        rows = rows[bool_series(rows["is_primary"])].copy()
+    if rows.empty:
+        raise ValueError("No primary SAMPLE_MAPPING rows matched the selected versions")
+
+    for column in (
+        "subject_id",
+        "mapping_version_id",
+        "source_run_id",
+        "source_device_type",
+        "target_run_id",
+        "target_device_type",
+    ):
+        rows[column] = rows[column].astype(str)
+    for column in ("source_sample_index", "target_sample_index"):
+        rows[column] = pd.to_numeric(rows[column], errors="raise").astype(int)
+
+    rows = attach_source_num_people(rows, store.read_table("SAMPLE_SUMMARY"))
+    people = pd.to_numeric(rows["num_people"], errors="coerce")
+    known_single = people.eq(1)
+    counts = {
+        "primary_mapping_rows": int(len(rows)),
+        "known_single_person_rows": int(known_single.sum()),
+        "excluded_multi_person_rows": int(people.gt(1).sum()),
+        "excluded_unknown_or_zero_person_rows": int(
+            (~known_single & ~people.gt(1)).sum()
+        ),
+    }
+    rows = rows.loc[known_single].copy()
+    if rows.empty:
+        raise ValueError(
+            "No selected primary mapping rows have SAMPLE_SUMMARY.num_people == 1"
+        )
+    return (
+        rows.sort_values(
+            ["subject_id", "mapping_version_id", "source_sample_index"]
+        ).reset_index(drop=True),
+        counts,
+    )
+
+
+def target_run_fps(
+    rows: pd.DataFrame,
+    device_runs: pd.DataFrame,
+    override_fps: float | None,
+) -> tuple[dict[tuple[str, str, str], float], str]:
+    """Resolve radar FPS independently for every selected target run."""
+    target_keys = rows[[
+        "subject_id",
+        "target_run_id",
+        "target_device_type",
+    ]].drop_duplicates()
+    resolved: dict[tuple[str, str, str], float] = {}
+    if override_fps is not None:
+        if float(override_fps) <= 0:
+            raise ValueError("target_fps must be positive")
+        for row in target_keys.itertuples(index=False):
+            resolved[(str(row.subject_id), str(row.target_run_id), str(row.target_device_type))] = (
+                float(override_fps)
+            )
+        return resolved, "command_line"
+
+    for row in target_keys.itertuples(index=False):
+        key = (
+            str(row.subject_id),
+            str(row.target_run_id),
+            str(row.target_device_type),
+        )
+        matches = device_runs[
+            (device_runs["subject_id"].astype(str) == key[0])
+            & (device_runs["run_id"].astype(str) == key[1])
+            & (device_runs["device_type"].astype(str) == key[2])
+        ]
+        values = pd.to_numeric(
+            matches.get("nominal_fps", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna().unique()
+        values = [float(value) for value in values if float(value) > 0]
+        if len(values) != 1:
+            raise ValueError(
+                "Could not derive exactly one positive nominal_fps for target run "
+                f"{key}; supply --target-fps explicitly"
+            )
+        resolved[key] = values[0]
+    return resolved, "DEVICE_RUN.nominal_fps"
+
+
+@dataclass
+class SyncWBWindowCollection:
+    windows: list[np.ndarray]
+    poses: np.ndarray
+    cloud_anchors: np.ndarray
+    rows: pd.DataFrame
+    selected_versions: pd.DataFrame
+    counts: dict[str, int]
+    fps_source: str
+
+
+def load_syncwb_supervised_windows(
+    *,
+    store: object,
+    artifact_root: str | Path,
+    versions: pd.DataFrame,
+    checkpoint: dict,
+    person_index: int,
+    target_fps_override: float | None,
+    min_center_points: int,
+    min_window_points: int,
+    min_valid_window_frames: int,
+    filter_noise: bool,
+    extrinsic_euler_deg: Sequence[float],
+    extrinsic_translation_m: Sequence[float],
+    max_frames: int,
+    seed: int,
+    progress: bool,
+) -> SyncWBWindowCollection:
+    """Materialise quality-filtered radar windows with finite Kinect labels."""
+    rows, counts = primary_rows_for_mapping_versions(store, versions)
+    if max_frames > 0 and len(rows) > max_frames:
+        # A proportional sample prevents a diagnostic cap from silently selecting
+        # only the first mapping version.
+        rng = np.random.default_rng(seed)
+        selected_ids: list[int] = []
+        for _, group in rows.groupby(
+            ["subject_id", "mapping_version_id"], sort=False
+        ):
+            quota = max(1, int(round(max_frames * len(group) / len(rows))))
+            quota = min(quota, len(group))
+            selected_ids.extend(
+                rng.choice(group.index.to_numpy(), size=quota, replace=False).tolist()
+            )
+        if len(selected_ids) > max_frames:
+            selected_ids = rng.choice(
+                np.asarray(selected_ids), size=max_frames, replace=False
+            ).tolist()
+        rows = rows.loc[sorted(selected_ids)].reset_index(drop=True)
+        counts["rows_after_max_frames_cap"] = int(len(rows))
+
+    window_size = int(checkpoint["window_size"])
+    if window_size < 1 or window_size % 2 == 0:
+        raise ValueError("Checkpoint window_size must be a positive odd integer")
+    if min_center_points < 1 or min_window_points < 1:
+        raise ValueError("Point-count thresholds must be positive")
+    if not 1 <= min_valid_window_frames <= window_size:
+        raise ValueError("min_valid_window_frames must be between 1 and window_size")
+    half_window = window_size // 2
+    sample_period_sec = float(
+        checkpoint.get("sample_period_sec", MMFI_SAMPLE_PERIOD_SEC)
+    )
+    fps_by_run, fps_source = target_run_fps(
+        rows,
+        store.read_table("DEVICE_RUN"),
+        target_fps_override,
+    )
+    stride_by_run = {
+        key: max(1, int(round(sample_period_sec * fps)))
+        for key, fps in fps_by_run.items()
+    }
+
+    run_assets = store.read_table("RUN_ASSET")
+    required_payloads: set[tuple[str, str, str, str]] = set()
+    radar_requests: set[tuple[str, str, str, int]] = set()
+    pose_requests: set[tuple[str, str, str, int]] = set()
+    for row in rows.itertuples(index=False):
+        subject_id = str(row.subject_id)
+        target_key = (
+            subject_id,
+            str(row.target_run_id),
+            str(row.target_device_type),
+        )
+        source_key = (
+            subject_id,
+            str(row.source_run_id),
+            str(row.source_device_type),
+        )
+        required_payloads.add((*target_key, "radar_points"))
+        required_payloads.add((*source_key, "pose3d"))
+        stride = stride_by_run[target_key]
+        target_centre = int(row.target_sample_index)
+        for offset in range(-half_window, half_window + 1):
+            target_index = target_centre + offset * stride
+            if target_index >= 0:
+                radar_requests.add((*target_key, target_index))
+        pose_requests.add((*source_key, int(row.source_sample_index)))
+
+    readers = open_syncwb_ragged_readers(
+        run_assets,
+        artifact_root,
+        required_payloads,
+    )
+    radar_cache: dict[tuple[str, str, str, int], np.ndarray | None] = {}
+    for subject_id, run_id, device_type, sample_index in tqdm(
+        sorted(radar_requests),
+        total=len(radar_requests),
+        desc="Cache fine-tuning radar frames",
+        leave=False,
+        disable=not progress,
+    ):
+        reader = readers[(subject_id, run_id, device_type, "radar_points")]
+        try:
+            radar_cache[(subject_id, run_id, device_type, sample_index)] = (
+                filter_syncwb_radar(reader.get(sample_index), filter_noise)
+            )
+        except KeyError:
+            radar_cache[(subject_id, run_id, device_type, sample_index)] = None
+
+    pose_cache: dict[tuple[str, str, str, int], np.ndarray | None] = {}
+    for subject_id, run_id, device_type, sample_index in tqdm(
+        sorted(pose_requests),
+        total=len(pose_requests),
+        desc="Cache fine-tuning Kinect poses",
+        leave=False,
+        disable=not progress,
+    ):
+        reader = readers[(subject_id, run_id, device_type, "pose3d")]
+        try:
+            pose_cache[(subject_id, run_id, device_type, sample_index)] = (
+                reader.get(sample_index)
+            )
+        except KeyError:
+            pose_cache[(subject_id, run_id, device_type, sample_index)] = None
+
+    windows: list[np.ndarray] = []
+    poses: list[np.ndarray] = []
+    anchors: list[np.ndarray] = []
+    kept_rows: list[dict[str, object]] = []
+    skipped = {
+        "incomplete_radar_window": 0,
+        "too_few_center_points": 0,
+        "too_few_window_points": 0,
+        "too_few_valid_window_frames": 0,
+        "missing_pose_payload": 0,
+        "invalid_pose": 0,
+    }
+
+    for row in tqdm(
+        rows.itertuples(index=False),
+        total=len(rows),
+        desc="Load supervised SyncWB windows",
+        disable=not progress,
+    ):
+        subject_id = str(row.subject_id)
+        target_key = (
+            subject_id,
+            str(row.target_run_id),
+            str(row.target_device_type),
+        )
+        source_key = (
+            subject_id,
+            str(row.source_run_id),
+            str(row.source_device_type),
+        )
+        stride = stride_by_run[target_key]
+        target_centre = int(row.target_sample_index)
+        frame_indices = [
+            target_centre + offset * stride
+            for offset in range(-half_window, half_window + 1)
+        ]
+        frames = [
+            radar_cache.get((*target_key, frame_index))
+            for frame_index in frame_indices
+        ]
+        if any(frame is None for frame in frames):
+            skipped["incomplete_radar_window"] += 1
+            continue
+        stacked = stack_radar_window(frames)
+        support = radar_window_support(stacked, window_size)
+        if int(support["center_point_count"]) < min_center_points:
+            skipped["too_few_center_points"] += 1
+            continue
+        if int(support["window_point_count"]) < min_window_points:
+            skipped["too_few_window_points"] += 1
+            continue
+        if int(support["valid_window_frames"]) < min_valid_window_frames:
+            skipped["too_few_valid_window_frames"] += 1
+            continue
+
+        pose3d = pose_cache.get((*source_key, int(row.source_sample_index)))
+        if pose3d is None:
+            skipped["missing_pose_payload"] += 1
+            continue
+        pose = kinect_pose32_to_radar_mmfi17(
+            pose3d,
+            person_index,
+            extrinsic_euler_deg=extrinsic_euler_deg,
+            extrinsic_translation_m=extrinsic_translation_m,
+        )
+        if pose is None or not np.all(np.isfinite(pose)):
+            skipped["invalid_pose"] += 1
+            continue
+        try:
+            cloud_anchor, _ = robust_cloud_anchor(stacked)
+        except ValueError:
+            skipped["incomplete_radar_window"] += 1
+            continue
+
+        windows.append(stacked)
+        poses.append(np.asarray(pose, dtype=np.float32))
+        anchors.append(cloud_anchor)
+        kept_rows.append({
+            "subject_id": subject_id,
+            "mapping_version_id": str(row.mapping_version_id),
+            "mapping_method": str(row.mapping_method),
+            "source_run_id": source_key[1],
+            "source_device_type": source_key[2],
+            "source_sample_index": int(row.source_sample_index),
+            "target_run_id": target_key[1],
+            "target_device_type": target_key[2],
+            "target_sample_index": target_centre,
+            "target_window_start": int(frame_indices[0]),
+            "target_window_end": int(frame_indices[-1]),
+            "target_frame_stride": int(stride),
+            "target_fps": float(fps_by_run[target_key]),
+            "center_point_count": int(support["center_point_count"]),
+            "window_point_count": int(support["window_point_count"]),
+            "valid_window_frames": int(support["valid_window_frames"]),
+        })
+
+    if not windows:
+        raise ValueError(
+            "No finite single-person Kinect labels passed the radar-window quality policy"
+        )
+    counts.update({f"skipped_{key}": int(value) for key, value in skipped.items()})
+    counts["supervised_windows"] = int(len(windows))
+    return SyncWBWindowCollection(
+        windows=windows,
+        poses=np.stack(poses).astype(np.float32),
+        cloud_anchors=np.stack(anchors).astype(np.float32),
+        rows=pd.DataFrame(kept_rows),
+        selected_versions=versions.copy(),
+        counts=counts,
+        fps_source=fps_source,
+    )
+
+
+class SyncWBWindowDataset(Dataset):
+    """Preloaded SyncWB radar windows paired with converted MM-Fi-17 Kinect pose."""
+
+    def __init__(
+        self,
+        collection: SyncWBWindowCollection,
+        indices: Sequence[int],
+        *,
+        bounds: PoseBounds,
+        bins: int,
+        num_points: int,
+        window_size: int,
+        training: bool,
+        seed: int,
+        feature_config: FeatureConfig,
+        target_mode: str,
+        yaw_aug_deg: float,
+        pitch_aug_deg: float,
+        roll_aug_deg: float,
+        translation_aug_m: Sequence[float],
+        body_scale_min: float,
+        body_scale_max: float,
+        x_reflection_probability: float,
+        signal_dropout_probability: float,
+    ):
+        self.collection = collection
+        self.indices = np.asarray(indices, dtype=np.int64)
+        self.bounds = bounds
+        self.bins = int(bins)
+        self.num_points = int(num_points)
+        self.window_size = int(window_size)
+        self.training = bool(training)
+        self.seed = int(seed)
+        self.feature_config = feature_config
+        self.target_mode = str(target_mode)
+        self.yaw_aug_deg = float(yaw_aug_deg)
+        self.pitch_aug_deg = float(pitch_aug_deg)
+        self.roll_aug_deg = float(roll_aug_deg)
+        self.translation_aug_m = tuple(float(v) for v in translation_aug_m)
+        self.body_scale_min = float(body_scale_min)
+        self.body_scale_max = float(body_scale_max)
+        self.x_reflection_probability = float(x_reflection_probability)
+        self.signal_dropout_probability = float(signal_dropout_probability)
+        self.low, self.high = bounds.arrays()
+        self._epoch_state = torch.zeros((), dtype=torch.int64).share_memory_()
+        if len(self.indices) == 0:
+            raise ValueError("SyncWBWindowDataset received no indices")
+
+    def __len__(self) -> int:
+        return int(len(self.indices))
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch_state.fill_(int(epoch))
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor | int]:
+        collection_index = int(self.indices[int(index)])
+        points = self.collection.windows[collection_index].copy()
+        pose = self.collection.poses[collection_index].copy()
+        cloud_anchor = self.collection.cloud_anchors[collection_index].copy()
+        rng = np.random.default_rng(
+            self.seed
+            + collection_index * 104729
+            + int(self._epoch_state.item()) * 1000003
+        )
+        if self.training:
+            points, pose, cloud_anchor = augment_geometry(
+                points,
+                pose,
+                cloud_anchor,
+                rng,
+                yaw_deg=self.yaw_aug_deg,
+                pitch_deg=self.pitch_aug_deg,
+                roll_deg=self.roll_aug_deg,
+                translation_m=self.translation_aug_m,
+                body_scale_min=self.body_scale_min,
+                body_scale_max=self.body_scale_max,
+                x_reflection_probability=self.x_reflection_probability,
+            )
+            valid = point_valid_mask(points)
+            if np.any(valid):
+                points[valid, :3] += rng.normal(
+                    0.0, 0.008, size=(valid.sum(), 3)
+                ).astype(np.float32)
+                points[valid, 3] += rng.normal(
+                    0.0, 0.03, size=valid.sum()
+                ).astype(np.float32)
+                drop = rng.random(valid.sum()) < 0.08
+                if np.all(drop):
+                    drop[int(rng.integers(0, len(drop)))] = False
+                points[np.flatnonzero(valid)[drop]] = 0.0
+
+        sampled, token_mask = frame_balanced_sample(
+            points,
+            self.num_points,
+            self.window_size,
+            rng if self.training else None,
+        )
+        features = robust_feature_normalize(
+            sampled,
+            self.feature_config,
+            cloud_anchor=(
+                cloud_anchor
+                if self.feature_config.spatial_mode == "cloud_anchor"
+                else None
+            ),
+        )
+        if (
+            self.training
+            and self.feature_config.signal_mode != "none"
+            and rng.random() < self.signal_dropout_probability
+        ):
+            features[:, -2] = 0.0
+
+        encoded_pose = encode_pose_target(
+            pose,
+            self.target_mode,
+            cloud_anchor=(
+                cloud_anchor
+                if self.target_mode == "cloud_anchor_relative"
+                else None
+            ),
+        )
+        normalized = np.clip(
+            (encoded_pose - self.low) / (self.high - self.low),
+            0.0,
+            1.0,
+        )
+        labels = np.rint(normalized * (self.bins - 1)).astype(np.int64)
+        return {
+            "points": torch.from_numpy(features),
+            "token_mask": torch.from_numpy(token_mask),
+            "labels": torch.from_numpy(labels),
+            "pose": torch.from_numpy(pose),
+            "cloud_anchor": torch.from_numpy(cloud_anchor),
+            "index": collection_index,
+        }
+
+
+def split_syncwb_train_validation(
+    rows: pd.DataFrame,
+    validation_fraction: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Use a held-out temporal tail from every mapping, with a window gap."""
+    if not 0.0 < validation_fraction < 0.5:
+        raise ValueError("validation_fraction must be in (0, 0.5)")
+    train_ids: list[int] = []
+    val_ids: list[int] = []
+    for _, group in rows.groupby(
+        ["subject_id", "mapping_version_id"], sort=False
+    ):
+        ordered = group.sort_values("target_sample_index")
+        if len(ordered) < 10:
+            raise ValueError(
+                "Every selected mapping needs at least 10 supervised windows "
+                "for a temporal train/validation split"
+            )
+        n_val = max(1, int(round(len(ordered) * validation_fraction)))
+        n_val = min(n_val, len(ordered) - 2)
+        validation = ordered.iloc[-n_val:]
+        validation_start = int(validation["target_window_start"].min())
+        training = ordered[
+            ordered["target_window_end"].astype(int) < validation_start
+        ]
+        if training.empty:
+            raise ValueError(
+                "Temporal validation gap removed every training window for "
+                f"{ordered.iloc[0]['mapping_version_id']}"
+            )
+        train_ids.extend(training.index.astype(int).tolist())
+        val_ids.extend(validation.index.astype(int).tolist())
+    return (
+        np.asarray(sorted(train_ids), dtype=np.int64),
+        np.asarray(sorted(val_ids), dtype=np.int64),
+    )
+
+
+def set_point_backbone_trainable(model: nn.Module, trainable: bool) -> None:
+    for module in (model.point_embed, model.encoder):
+        for parameter in module.parameters():
+            parameter.requires_grad_(trainable)
+
+
+def finetune_syncwb_command(args: argparse.Namespace) -> None:
+    """Supervised target-domain fine-tuning without changing model topology."""
+    from sync_workbench.storage.sqlite_store import SQLiteCoreStore
+
+    seed_everything(args.seed)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    model, bounds, source_checkpoint, feature_config, target_mode = load_checkpoint(
+        Path(args.checkpoint),
+        device,
+    )
+    window_size = int(source_checkpoint["window_size"])
+    num_points = int(source_checkpoint.get("num_points", 320))
+    model_config = dict(source_checkpoint["model_config"])
+    bins = int(model_config["bins"])
+    quality_defaults = source_checkpoint.get("inference_quality_defaults", {})
+    min_center_points = (
+        int(args.min_center_points)
+        if args.min_center_points is not None
+        else int(quality_defaults.get("min_center_points", 10))
+    )
+    min_window_points = (
+        int(args.min_window_points)
+        if args.min_window_points is not None
+        else int(quality_defaults.get("min_window_points", 64))
+    )
+    min_valid_window_frames = (
+        int(args.min_valid_window_frames)
+        if args.min_valid_window_frames is not None
+        else int(quality_defaults.get("min_valid_window_frames", 3))
+    )
+    if not 0.0 < args.body_scale_min <= args.body_scale_max:
+        raise ValueError("Require 0 < body_scale_min <= body_scale_max")
+    if not 0.0 <= args.x_reflection_probability <= 1.0:
+        raise ValueError("x_reflection_probability must be in [0,1]")
+    if not 0.0 <= args.signal_dropout_probability <= 1.0:
+        raise ValueError("signal_dropout_probability must be in [0,1]")
+
+    store = SQLiteCoreStore(args.sqlite)
+    versions = select_syncwb_mapping_versions(
+        store,
+        args.subjects,
+        args.mapping_methods,
+    )
+    collection = load_syncwb_supervised_windows(
+        store=store,
+        artifact_root=args.artifact_root,
+        versions=versions,
+        checkpoint=source_checkpoint,
+        person_index=args.person_index,
+        target_fps_override=args.target_fps,
+        min_center_points=min_center_points,
+        min_window_points=min_window_points,
+        min_valid_window_frames=min_valid_window_frames,
+        filter_noise=args.filter_noise,
+        extrinsic_euler_deg=(
+            args.kinect_to_radar_roll_deg,
+            args.kinect_to_radar_pitch_deg,
+            args.kinect_to_radar_yaw_deg,
+        ),
+        extrinsic_translation_m=(
+            args.kinect_to_radar_tx_m,
+            args.kinect_to_radar_ty_m,
+            args.kinect_to_radar_tz_m,
+        ),
+        max_frames=args.max_frames,
+        seed=args.seed,
+        progress=args.progress,
+    )
+    bound_low, bound_high = bounds.arrays()
+    encoded_target = encode_pose_target(
+        collection.poses,
+        target_mode,
+        cloud_anchor=(
+            collection.cloud_anchors
+            if target_mode == "cloud_anchor_relative"
+            else None
+        ),
+    )
+    outside_bounds = (encoded_target < bound_low) | (encoded_target > bound_high)
+    bound_diagnostics = {
+        "coordinate_fraction_outside_pretrained_bounds": float(
+            outside_bounds.mean()
+        ),
+        "frame_fraction_with_any_coordinate_outside_pretrained_bounds": float(
+            outside_bounds.any(axis=(1, 2)).mean()
+        ),
+        "joint_axis_counts_below": (
+            encoded_target < bound_low
+        ).sum(axis=0).astype(int).tolist(),
+        "joint_axis_counts_above": (
+            encoded_target > bound_high
+        ).sum(axis=0).astype(int).tolist(),
+        "policy": (
+            "Retain pretrained SimCC bins/bounds; out-of-range labels are clipped "
+            "rather than reinterpreting pretrained head logits."
+        ),
+    }
+    if bound_diagnostics[
+        "frame_fraction_with_any_coordinate_outside_pretrained_bounds"
+    ] > 0.01:
+        warnings.warn(
+            "More than 1% of SyncWB frames contain a target coordinate outside "
+            "the pretrained SimCC bounds; inspect finetune_manifest.json.",
+            RuntimeWarning,
+        )
+    train_indices, val_indices = split_syncwb_train_validation(
+        collection.rows,
+        args.validation_fraction,
+    )
+    if args.max_train_frames > 0 and len(train_indices) > args.max_train_frames:
+        rng = np.random.default_rng(args.seed)
+        train_indices = np.sort(
+            rng.choice(
+                train_indices,
+                size=args.max_train_frames,
+                replace=False,
+            )
+        )
+    if args.max_val_frames > 0 and len(val_indices) > args.max_val_frames:
+        rng = np.random.default_rng(args.seed + 1)
+        val_indices = np.sort(
+            rng.choice(val_indices, size=args.max_val_frames, replace=False)
+        )
+
+    dataset_kwargs = {
+        "collection": collection,
+        "bounds": bounds,
+        "bins": bins,
+        "num_points": num_points,
+        "window_size": window_size,
+        "seed": args.seed,
+        "feature_config": feature_config,
+        "target_mode": target_mode,
+        "yaw_aug_deg": args.yaw_aug_deg,
+        "pitch_aug_deg": args.pitch_aug_deg,
+        "roll_aug_deg": args.roll_aug_deg,
+        "translation_aug_m": (
+            args.translation_aug_x_m,
+            args.translation_aug_y_m,
+            args.translation_aug_z_m,
+        ),
+        "body_scale_min": args.body_scale_min,
+        "body_scale_max": args.body_scale_max,
+        "x_reflection_probability": args.x_reflection_probability,
+        "signal_dropout_probability": args.signal_dropout_probability,
+    }
+    train_ds = SyncWBWindowDataset(
+        indices=train_indices,
+        training=True,
+        **dataset_kwargs,
+    )
+    val_ds = SyncWBWindowDataset(
+        indices=val_indices,
+        training=False,
+        **dataset_kwargs,
+    )
+    train_loader = make_loader(
+        train_ds,
+        args.batch_size,
+        args.workers,
+        True,
+        device,
+    )
+    val_loader = make_loader(
+        val_ds,
+        args.batch_size,
+        args.workers,
+        False,
+        device,
+    )
+    before_metrics, before_pred, val_target, val_collection_indices = evaluate_loader(
+        model,
+        val_loader,
+        bounds,
+        target_mode,
+        device,
+        args.amp,
+        args.progress,
+        "Validate pretrained",
+    )
+
+    split_manifest = {
+        "adaptation_type": "supervised_target_domain_finetuning",
+        "adaptation_version": SYNCWB_FINETUNE_VERSION,
+        "pretrained_checkpoint": str(Path(args.checkpoint).resolve()),
+        "subjects": list(args.subjects),
+        "mapping_methods": list(args.mapping_methods),
+        "selected_mapping_versions": versions.to_dict("records"),
+        "counts": collection.counts,
+        "pretrained_pose_bound_diagnostics": bound_diagnostics,
+        "train_windows": int(len(train_indices)),
+        "validation_windows": int(len(val_indices)),
+        "split_policy": (
+            "temporal tail per mapping version with overlapping-window boundary gap"
+        ),
+        "kinect_joint_conversion": {
+            "source": "Azure Kinect 32 joints",
+            "target": "native MM-Fi 17-joint ordering",
+            "indices": KINECT32_TO_MMFI17.tolist(),
+            "axis_basis": "[x,y,z] mm -> [x,z,-y] m, then optional rigid extrinsic",
+        },
+        "kinect_to_radar_extrinsic": {
+            "euler_xyz_deg": [
+                args.kinect_to_radar_roll_deg,
+                args.kinect_to_radar_pitch_deg,
+                args.kinect_to_radar_yaw_deg,
+            ],
+            "translation_xyz_m": [
+                args.kinect_to_radar_tx_m,
+                args.kinect_to_radar_ty_m,
+                args.kinect_to_radar_tz_m,
+            ],
+            "warning": (
+                "Default zero values are an uncalibrated co-location assumption, "
+                "not measured sensor extrinsics."
+            ),
+        },
+        "args": {key: value for key, value in vars(args).items() if key != "func"},
+    }
+    (out / "finetune_manifest.json").write_text(
+        json.dumps(split_manifest, indent=2),
+        encoding="utf-8",
+    )
+    collection.rows.assign(
+        split=np.where(
+            collection.rows.index.isin(set(val_indices.tolist())),
+            "validation",
+            np.where(
+                collection.rows.index.isin(set(train_indices.tolist())),
+                "train",
+                "gap_or_cap_excluded",
+            ),
+        )
+    ).to_csv(out / "windows.csv", index=False)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+    )
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=args.amp and device.type == "cuda",
+    )
+    low_np, high_np = bounds.arrays()
+    low = torch.tensor(low_np, device=device)
+    high = torch.tensor(high_np, device=device)
+    history: list[dict[str, float | int | bool]] = []
+    best_val = float("inf")
+
+    print(json.dumps({
+        "adaptation_version": SYNCWB_FINETUNE_VERSION,
+        "device": str(device),
+        "selected_mapping_versions": int(len(versions)),
+        "selected_target_runs": int(
+            versions[["subject_id", "target_run_id"]].drop_duplicates().shape[0]
+        ),
+        "windows": {"train": len(train_ds), "validation": len(val_ds)},
+        "pretrained_validation": before_metrics,
+        "pretrained_pose_bound_diagnostics": bound_diagnostics,
+        "architecture_changed": False,
+        "joint_head": "existing native MM-Fi 17-joint SimCC head",
+    }, indent=2))
+
+    for epoch in range(1, args.epochs + 1):
+        backbone_trainable = epoch > args.freeze_backbone_epochs
+        set_point_backbone_trainable(model, backbone_trainable)
+        set_dataset_epoch(train_ds, epoch)
+        model.train()
+        if not backbone_trainable:
+            model.point_embed.eval()
+            model.encoder.eval()
+        train_losses: list[float] = []
+        iterator = tqdm(
+            train_loader,
+            total=len(train_loader),
+            desc=f"Fine-tune {epoch}/{args.epochs}",
+            leave=False,
+            disable=not args.progress,
+        )
+        for batch in iterator:
+            points = batch["points"].to(device, non_blocking=True)
+            token_mask = batch["token_mask"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
+            target_pose = batch["pose"].to(device, non_blocking=True)
+            cloud_anchor = batch["cloud_anchor"].to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                enabled=args.amp and device.type == "cuda",
+            ):
+                logits = model(points, token_mask)
+                loss = simcc_loss(logits, labels)
+                pred_pose = decode_simcc(
+                    logits,
+                    low,
+                    high,
+                    target_mode,
+                    cloud_anchor,
+                )
+                pred_bones = torch.stack([
+                    pred_pose[:, b] - pred_pose[:, a]
+                    for a, b in MMFI17_EDGES
+                ], dim=1)
+                true_bones = torch.stack([
+                    target_pose[:, b] - target_pose[:, a]
+                    for a, b in MMFI17_EDGES
+                ], dim=1)
+                loss = loss + args.bone_weight * F.smooth_l1_loss(
+                    pred_bones,
+                    true_bones,
+                )
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            train_losses.append(float(loss.item()))
+            if args.progress:
+                iterator.set_postfix(loss=f"{loss.item():.4f}")
+
+        scheduler.step()
+        val_metrics, val_pred, val_target, val_collection_indices = evaluate_loader(
+            model,
+            val_loader,
+            bounds,
+            target_mode,
+            device,
+            args.amp,
+            args.progress,
+            "Validate fine-tuned",
+        )
+        criterion = float(
+            val_metrics["body15_excluding_uncertain_face_head"][
+                "root_relative_mpjpe_mm"
+            ]
+        )
+        row = {
+            "epoch": epoch,
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            "backbone_trainable": backbone_trainable,
+            "train_loss": float(np.mean(train_losses)),
+            "val_body15_root_relative_mpjpe_mm": criterion,
+            "val_body15_mpjpe_mm": float(
+                val_metrics["body15_excluding_uncertain_face_head"]["mpjpe_mm"]
+            ),
+            "val_loss": float(val_metrics["loss"]),
+        }
+        history.append(row)
+        pd.DataFrame(history).to_csv(out / "history.csv", index=False)
+        print(json.dumps(row))
+        if criterion < best_val:
+            best_val = criterion
+            adapted = dict(source_checkpoint)
+            adapted.update({
+                "script_version": SCRIPT_VERSION,
+                "model": model.state_dict(),
+                "epoch": epoch,
+                "val_metrics": val_metrics,
+                "mmfi_val_metrics_before_finetune": source_checkpoint.get(
+                    "val_metrics", {}
+                ),
+                "adaptation": {
+                    "type": "supervised_target_domain_finetuning",
+                    "version": SYNCWB_FINETUNE_VERSION,
+                    "pretrained_checkpoint": str(Path(args.checkpoint).resolve()),
+                    "subjects": list(args.subjects),
+                    "mapping_methods": list(args.mapping_methods),
+                    "mapping_version_ids": versions[
+                        "mapping_version_id"
+                    ].astype(str).tolist(),
+                    "kinect32_to_mmfi17": KINECT32_TO_MMFI17.tolist(),
+                    "pretrained_pose_bound_diagnostics": bound_diagnostics,
+                    "validation_selection_metric": (
+                        "body15_root_relative_mpjpe_mm"
+                    ),
+                    "architecture_changed": False,
+                },
+            })
+            torch.save(adapted, out / "best.pt")
+            np.savez_compressed(
+                out / "validation_predictions.npz",
+                pred=val_pred,
+                target=val_target,
+                collection_index=val_collection_indices,
+                joint_names=np.asarray(MMFI17_NAMES),
+            )
+
+    best_checkpoint = torch.load(
+        out / "best.pt",
+        map_location=device,
+        weights_only=False,
+    )
+    model.load_state_dict(best_checkpoint["model"])
+    final_metrics, _, _, _ = evaluate_loader(
+        model,
+        val_loader,
+        bounds,
+        target_mode,
+        device,
+        args.amp,
+        args.progress,
+        "Validate best",
+    )
+    result = {
+        "pretrained_validation": before_metrics,
+        "fine_tuned_validation": final_metrics,
+        "selection_metric": "body15_root_relative_mpjpe_mm",
+        "best_epoch": int(best_checkpoint["epoch"]),
+    }
+    (out / "validation_metrics.json").write_text(
+        json.dumps(result, indent=2),
+        encoding="utf-8",
+    )
+    print(json.dumps(result, indent=2))
+
+
+def safe_path_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._")
+    return cleaned or "unnamed"
+
+
+def infer_syncwb_all_command(args: argparse.Namespace) -> None:
+    """Run the existing per-mapping inference for every selected version."""
+    from sync_workbench.storage.sqlite_store import SQLiteCoreStore
+
+    store = SQLiteCoreStore(args.sqlite)
+    versions = select_syncwb_mapping_versions(
+        store,
+        args.subjects,
+        args.mapping_methods,
+    )
+    root = Path(args.out)
+    root.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, object]] = []
+    for version in versions.itertuples(index=False):
+        output = (
+            root
+            / safe_path_component(str(version.subject_id))
+            / safe_path_component(str(version.mapping_version_id))
+        )
+        child = argparse.Namespace(**vars(args))
+        child.subject = str(version.subject_id)
+        child.mapping_version = str(version.mapping_version_id)
+        child.out = str(output)
+        infer_syncwb_command(child)
+        metrics_path = output / "metrics.json"
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        results.append({
+            "subject_id": child.subject,
+            "mapping_version_id": child.mapping_version,
+            "mapping_method": str(version.mapping_method),
+            "source_run_id": str(version.source_run_id),
+            "target_run_id": str(version.target_run_id),
+            "output": str(output),
+            "single_person_raw": metrics.get("single_person_raw", {}),
+            "single_person_globally_aligned_heldout": metrics.get(
+                "single_person_globally_aligned_heldout", {}
+            ),
+        })
+    summary = {
+        "checkpoint": str(Path(args.checkpoint).resolve()),
+        "subjects": list(args.subjects),
+        "mapping_methods": list(args.mapping_methods),
+        "mapping_versions_run": len(results),
+        "runs": results,
+    }
+    (root / "all_runs_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def infer_syncwb_command(args: argparse.Namespace) -> None:
     # Deferred imports keep MM-Fi-only training independent of SyncWB.
     from sync_workbench.storage.sqlite_store import SQLiteCoreStore
@@ -2628,7 +3713,16 @@ def infer_syncwb_command(args: argparse.Namespace) -> None:
     heldout_mask[evaluation_indices] = True
 
     summary: dict[str, object] = {
-        "checkpoint_mmfi_validation": checkpoint.get("val_metrics", {}),
+        "checkpoint_mmfi_validation": checkpoint.get(
+            "mmfi_val_metrics_before_finetune",
+            checkpoint.get("val_metrics", {}),
+        ),
+        "checkpoint_adaptation": checkpoint.get("adaptation"),
+        "checkpoint_adaptation_validation": (
+            checkpoint.get("val_metrics", {})
+            if checkpoint.get("adaptation") is not None
+            else None
+        ),
         "checkpoint_preprocessing": {
             "script_version": checkpoint.get("script_version"),
             "feature_config": asdict(feature_config),
@@ -3074,6 +4168,123 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
     train.add_argument("--cpu", action="store_true")
     train.set_defaults(func=train_command)
+
+    finetune = subparsers.add_parser(
+        "finetune-syncwb",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help=(
+            "Supervised fine-tuning on every selected SyncWB mapping version; "
+            "the pretrained architecture and MM-Fi-17 output head are retained"
+        ),
+    )
+    finetune.add_argument("--checkpoint", required=True)
+    finetune.add_argument("--sqlite", required=True)
+    finetune.add_argument("--artifact-root", required=True)
+    finetune.add_argument("--subjects", nargs="+", required=True)
+    finetune.add_argument(
+        "--mapping-methods",
+        nargs="+",
+        default=["initial_nearest_for_anchoring"],
+    )
+    finetune.add_argument("--out", default="runs/mmfi_pose_syncwb_finetuned")
+    finetune.add_argument("--epochs", type=int, default=10)
+    finetune.add_argument("--batch-size", type=int, default=64)
+    finetune.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="0 avoids duplicating preloaded SyncWB windows on Windows",
+    )
+    finetune.add_argument("--lr", type=float, default=3e-5)
+    finetune.add_argument("--weight-decay", type=float, default=1e-4)
+    finetune.add_argument("--bone-weight", type=float, default=0.10)
+    finetune.add_argument("--freeze-backbone-epochs", type=int, default=1)
+    finetune.add_argument("--validation-fraction", type=float, default=0.10)
+    finetune.add_argument("--max-frames", type=int, default=0)
+    finetune.add_argument("--max-train-frames", type=int, default=0)
+    finetune.add_argument("--max-val-frames", type=int, default=10000)
+    finetune.add_argument("--person-index", type=int, default=0)
+    finetune.add_argument("--target-fps", type=float, default=None)
+    finetune.add_argument("--min-center-points", type=int, default=None)
+    finetune.add_argument("--min-window-points", type=int, default=None)
+    finetune.add_argument("--min-valid-window-frames", type=int, default=None)
+    finetune.add_argument("--kinect-to-radar-roll-deg", type=float, default=0.0)
+    finetune.add_argument("--kinect-to-radar-pitch-deg", type=float, default=0.0)
+    finetune.add_argument("--kinect-to-radar-yaw-deg", type=float, default=0.0)
+    finetune.add_argument("--kinect-to-radar-tx-m", type=float, default=0.0)
+    finetune.add_argument("--kinect-to-radar-ty-m", type=float, default=0.0)
+    finetune.add_argument("--kinect-to-radar-tz-m", type=float, default=0.0)
+    finetune.add_argument("--yaw-aug-deg", type=float, default=10.0)
+    finetune.add_argument("--pitch-aug-deg", type=float, default=5.0)
+    finetune.add_argument("--roll-aug-deg", type=float, default=5.0)
+    finetune.add_argument("--translation-aug-x-m", type=float, default=0.10)
+    finetune.add_argument("--translation-aug-y-m", type=float, default=0.10)
+    finetune.add_argument("--translation-aug-z-m", type=float, default=0.10)
+    finetune.add_argument("--body-scale-min", type=float, default=0.95)
+    finetune.add_argument("--body-scale-max", type=float, default=1.05)
+    finetune.add_argument("--x-reflection-probability", type=float, default=0.0)
+    finetune.add_argument("--signal-dropout-probability", type=float, default=0.0)
+    finetune.add_argument(
+        "--filter-noise",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    finetune.add_argument("--seed", type=int, default=7)
+    finetune.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    finetune.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    finetune.add_argument("--cpu", action="store_true")
+    finetune.set_defaults(func=finetune_syncwb_command)
+
+    infer_all = subparsers.add_parser(
+        "infer-syncwb-all",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Run inference/testing for every selected subject mapping version",
+    )
+    infer_all.add_argument("--checkpoint", required=True)
+    infer_all.add_argument("--sqlite", required=True)
+    infer_all.add_argument("--artifact-root", required=True)
+    infer_all.add_argument("--subjects", nargs="+", required=True)
+    infer_all.add_argument(
+        "--mapping-methods",
+        nargs="+",
+        default=["initial_nearest_for_anchoring"],
+    )
+    infer_all.add_argument("--out", default="runs/syncwb_pose_all")
+    infer_all.add_argument("--person-index", type=int, default=0)
+    infer_all.add_argument("--kinect-to-radar-roll-deg", type=float, default=0.0)
+    infer_all.add_argument("--kinect-to-radar-pitch-deg", type=float, default=0.0)
+    infer_all.add_argument("--kinect-to-radar-yaw-deg", type=float, default=0.0)
+    infer_all.add_argument("--kinect-to-radar-tx-m", type=float, default=0.0)
+    infer_all.add_argument("--kinect-to-radar-ty-m", type=float, default=0.0)
+    infer_all.add_argument("--kinect-to-radar-tz-m", type=float, default=0.0)
+    infer_all.add_argument("--window-size", type=int, default=None)
+    infer_all.add_argument("--num-points", type=int, default=None)
+    infer_all.add_argument("--target-fps", type=float, default=None)
+    infer_all.add_argument("--min-center-points", type=int, default=None)
+    infer_all.add_argument("--min-window-points", type=int, default=None)
+    infer_all.add_argument("--min-valid-window-frames", type=int, default=None)
+    infer_all.add_argument("--batch-size", type=int, default=256)
+    infer_all.add_argument("--max-frames", type=int, default=0)
+    infer_all.add_argument("--calibration-fraction", type=float, default=0.10)
+    infer_all.add_argument("--lag-sweep", type=int, default=20)
+    infer_all.add_argument(
+        "--filter-noise",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    infer_all.add_argument("--seed", type=int, default=7)
+    infer_all.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    infer_all.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    infer_all.add_argument("--cpu", action="store_true")
+    infer_all.set_defaults(func=infer_syncwb_all_command)
 
     infer = subparsers.add_parser(
         "infer-syncwb",
