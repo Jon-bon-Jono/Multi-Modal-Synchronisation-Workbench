@@ -1,3 +1,7 @@
+@echo off
+setlocal
+pushd "%~dp0..\.." || exit /b 1
+
 syncwb map-nearest-all ^
   --sqlite "workbench.sqlite" ^
   --source-device "kinect_rgb" ^
@@ -11,4 +15,8 @@ syncwb map-nearest-all ^
   --source-margin-ms 100 ^
   --primary-policy "supported-only" ^
   --pair-report-csv "reports/initial_rgb_to_pc_v001_pair_report.csv" ^
-  --overwrite ^
+  --overwrite
+
+set "SYNCWB_EXIT_CODE=%ERRORLEVEL%"
+popd
+endlocal & exit /b %SYNCWB_EXIT_CODE%

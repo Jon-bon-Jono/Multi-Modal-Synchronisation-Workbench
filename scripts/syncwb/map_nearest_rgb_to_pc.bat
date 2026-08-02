@@ -1,3 +1,7 @@
+@echo off
+setlocal
+pushd "%~dp0..\.." || exit /b 1
+
 syncwb map-nearest ^
   --sqlite "workbench.sqlite" ^
   --subject "19_MM" ^
@@ -11,3 +15,7 @@ syncwb map-nearest ^
   --top-k 3 ^
   --overwrite ^
   --diagnostics-csv "reports/rgb_to_pc_initial_v001_diagnostics.csv"
+
+set "SYNCWB_EXIT_CODE=%ERRORLEVEL%"
+popd
+endlocal & exit /b %SYNCWB_EXIT_CODE%

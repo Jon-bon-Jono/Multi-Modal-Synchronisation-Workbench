@@ -63,7 +63,7 @@ The output directory contains:
 
 Example
 -------
-python mmfi_syncwb_domain_diagnostics.py \
+python ml/mmfi_syncwb_domain_diagnostics.py \
     --packed-root "D:/backup_data/MM-Fi/packed_data" \
     --sqlite workbench.sqlite \
     --artifact-root artifact_store \

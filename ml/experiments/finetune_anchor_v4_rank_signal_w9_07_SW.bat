@@ -1,4 +1,8 @@
-python mmfi_pose_quick.py finetune-syncwb ^
+@echo off
+setlocal
+pushd "%~dp0..\.." || exit /b 1
+
+python ml\mmfi_pose_quick.py finetune-syncwb ^
   --checkpoint "runs\mmfi_pose_anchor_v4_rank_signal\best.pt" ^
   --sqlite "workbench.sqlite" ^
   --artifact-root "artifact_store" ^
@@ -10,3 +14,7 @@ python mmfi_pose_quick.py finetune-syncwb ^
   --workers 0 ^
   --lr 3e-5 ^
   --freeze-backbone-epochs 1
+
+set "SYNCWB_EXIT_CODE=%ERRORLEVEL%"
+popd
+endlocal & exit /b %SYNCWB_EXIT_CODE%

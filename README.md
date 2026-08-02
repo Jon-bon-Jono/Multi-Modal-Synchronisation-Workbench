@@ -48,6 +48,18 @@ conda activate syncwb
 python -m pip install -e .
 ```
 
+## Repository layout
+
+- `src/sync_workbench/` contains the installable synchronization workbench.
+- `scripts/syncwb/` contains Windows launchers for specific operational
+  workflows. Each launcher changes to the repository root before it runs.
+- `ml/` contains optional, experimental MM-Fi pose-estimation work and its
+  separate PyTorch requirements. SyncWB does not import this directory.
+- `ml/experiments/` contains named, reproducible Windows ML experiment
+  launchers.
+
+See `ml/README.md` and `scripts/README.md` for details.
+
 For Parquet export, install pyarrow:
 
 ```bash

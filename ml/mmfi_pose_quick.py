@@ -19,7 +19,7 @@ This version uses:
 - SyncWB metrics only for frames whose SAMPLE_SUMMARY.num_people == 1.
 
 Recommended geometry + Doppler baseline:
-    python mmfi_pose_quick.py train \
+    python ml/mmfi_pose_quick.py train \
         --packed-root "D:/backup_data/MM-Fi/packed_data" \
         --out runs/mmfi_pose_anchor_v4 \
         --split cross_environment \
@@ -29,7 +29,7 @@ Recommended geometry + Doppler baseline:
         --epochs 25
 
 Return-strength ablation using domain-compatible within-window normalisation:
-    python mmfi_pose_quick.py train \
+    python ml/mmfi_pose_quick.py train \
         --packed-root "D:/backup_data/MM-Fi/packed_data" \
         --out runs/mmfi_pose_anchor_v4_robust_signal \
         --signal-mode robust \
@@ -38,7 +38,7 @@ Return-strength ablation using domain-compatible within-window normalisation:
         --epochs 25
 
 Apply the checkpoint to one SyncWB mapping version:
-    python mmfi_pose_quick.py infer-syncwb \
+    python ml/mmfi_pose_quick.py infer-syncwb \
         --checkpoint runs/mmfi_pose_anchor_v4/best.pt \
         --sqlite workbench.sqlite \
         --artifact-root artifact_store \
@@ -47,7 +47,7 @@ Apply the checkpoint to one SyncWB mapping version:
         --out runs/19_MM_mmfi_pose_anchor_v4
 
 Supervised fine-tuning on all selected subject runs/mapping versions:
-    python mmfi_pose_quick.py finetune-syncwb \
+    python ml/mmfi_pose_quick.py finetune-syncwb \
         --checkpoint runs/mmfi_pose_anchor_v4/best.pt \
         --sqlite workbench.sqlite \
         --artifact-root artifact_store \
@@ -56,7 +56,7 @@ Supervised fine-tuning on all selected subject runs/mapping versions:
         --out runs/mmfi_pose_anchor_v4_finetuned_07_SW
 
 Inference/testing on all selected subject runs/mapping versions:
-    python mmfi_pose_quick.py infer-syncwb-all \
+    python ml/mmfi_pose_quick.py infer-syncwb-all \
         --checkpoint runs/mmfi_pose_anchor_v4_finetuned_07_SW/best.pt \
         --sqlite workbench.sqlite \
         --artifact-root artifact_store \
