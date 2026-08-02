@@ -814,7 +814,7 @@ This data is not available when either the Kinect didn't detect any people or th
 
 ### 9.3 `radar_pc_samples.zst`
 
-Temporary file containing serialised pandas data frame for point-cloud radar. One row per point-cloud radar frame. The dataframe index name is 'frame_id' and represents a unique radar point cloud frame identifier over the entire dataset starting from 1.
+Temporary file containing serialised pandas data frame for point cloud generated online from the point-cloud radar. One row per point-cloud radar frame. The dataframe index name is 'frame_id' and represents a unique radar point cloud frame identifier over the entire dataset starting from 1.
 
 | Column | DType | Description | NA |
 | ------ | ----- | ----------- | -- |
@@ -826,6 +826,21 @@ Temporary file containing serialised pandas data frame for point-cloud radar. On
 | `points` | Object (Numpy Array) | Numpy array containing the radar point cloud frame with shape  (`P`, 6) where `P` is the number of cloud points. The dimensions are x, y, z, radial velocity, SNR and GTRACK target identifier. | Never |
 | `point_count` | int64 | Number of radar cloud point in the frame. | Never |
 | `point_count_filtered` | int32 | Number of radar cloud point in the frame after removing noise using GTRACK. | Never |
+
+### 9.4 `radar_raw_samples.zst`
+
+Temporary file containing serialised pandas data frame for point-cloud generated offline from the raw radar. One row per raw-radar frame. The dataframe index name is 'frame_id' and represents a unique radar raw-radar frame identifier over the entire dataset starting from 1.
+
+| Column | DType | Description | NA |
+| ------ | ----- | ----------- | -- |
+| `subject_id` | Object (str) | Unique for each subject involved in experiments | Never |
+| `run_id` | Object (str) | Unique for each execution of SmartCup. This is essentially a datetime string with prefix "Session". For each SmartCup execution, data is saved in a folder with `run_id` as the name. Radar pc and radar raw data streams share the same `run_id` because they were captured on Host 2 in the same SmartCup session/execution. | Never | 
+| `frame_number` | float64 | Raw radar frame number for the current device run. | Never |
+| `sample_kind` | Object (str) | This is always "frame". | Never |
+| `estimated_wallclock_from_start_end` | Object (str) | The estimated acquisition timestamp for the raw radar frame, calculated by uniformly interpolating the frame's position within the device run between the run's OS start and end wall-clock timestamps. This is a string formatted using the official SyncWB datetime format `"%Y-%m-%dT%H:%M:%S.%f"`. | Never |
+| `points` | Object (Numpy Array) | Numpy array containing the radar point cloud frame derived from the raw radar frame with shape  (`P`, 6) where `P` is the number of cloud points. The dimensions are x, y, z, radial velocity, SNR and GTRACK target identifier. | Never |
+| `point_count` | int64 | Number of radar cloud points derived from the raw frame. | Never |
+| `point_count_filtered` | int32 | Number of radar cloud points derived from the frame after removing noise using GTRACK. | Never |
 
 ## 10. Current bottom line
 
