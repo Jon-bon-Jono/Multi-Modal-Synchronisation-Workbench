@@ -107,10 +107,10 @@ class RaggedNpzReader:
         self.path = Path(path)
         if not self.path.exists():
             raise FileNotFoundError(self.path)
-        self._npz = np.load(self.path, allow_pickle=False)
-        self.sample_index = self._npz["sample_index"].astype(np.int64)
-        self.offsets = self._npz["offsets"].astype(np.int64)
-        self.values = self._npz["values"]
+        with np.load(self.path, allow_pickle=False) as bundle:
+            self.sample_index = bundle["sample_index"].astype(np.int64)
+            self.offsets = bundle["offsets"].astype(np.int64)
+            self.values = bundle["values"]
         self._lookup = {int(idx): i for i, idx in enumerate(self.sample_index)}
 
     def get(self, sample_index: int) -> np.ndarray:
@@ -155,6 +155,8 @@ class RaggedNpzReader:
             issues.append("offsets are not monotonic")
         if len(self.offsets) and int(self.offsets[-1]) != int(self.values.shape[0]):
             issues.append("last offset does not match values length")
+        if np.any(np.diff(self.sample_index) <= 0):
+            issues.append("sample_index values are not strictly increasing")
         if len(set(map(int, self.sample_index))) != len(self.sample_index):
             issues.append("duplicate sample_index values")
         return issues

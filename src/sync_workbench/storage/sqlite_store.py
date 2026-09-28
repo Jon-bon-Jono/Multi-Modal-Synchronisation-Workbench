@@ -45,7 +45,7 @@ class SQLiteCoreStore:
             raise KeyError(f"Unknown canonical table: {name}")
         with self.connect() as conn:
             try:
-                return pd.read_sql_query(f'SELECT * FROM "{name}"', conn)
+                return align_to_spec(name, pd.read_sql_query(f'SELECT * FROM "{name}"', conn))
             except Exception:
                 return TABLE_SPECS[name].empty()
 

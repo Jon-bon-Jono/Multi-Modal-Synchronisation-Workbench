@@ -21,13 +21,18 @@ class TempPackage:
         root_path = Path(root)
         if not root_path.exists():
             raise FileNotFoundError(root_path)
+        if (root_path / "radar_raw_point_cloud_versions.json").exists():
+            raise ValueError("Versioned raw packages require import-raw-point-clouds; legacy ingestion/build commands cannot read this package")
+        raw_samples = _read_optional(root_path / "radar_raw_samples.zst")
+        if raw_samples is not None and "point_cloud_version_id" in raw_samples.columns:
+            raise ValueError("Versioned raw package requires its manifest and import-raw-point-clouds")
         device_runs = _read_required(root_path / "device_runs.zst")
         return cls(
             root=root_path,
             device_runs=device_runs,
             rgb_samples=_read_optional(root_path / "rgb_samples.zst"),
             radar_pc_samples=_read_optional(root_path / "radar_pc_samples.zst"),
-            radar_raw_samples=_read_optional(root_path / "radar_raw_samples.zst"),
+            radar_raw_samples=raw_samples,
             run_assets=_read_optional(root_path / "run_assets.zst"),
         )
 

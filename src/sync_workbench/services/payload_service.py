@@ -5,12 +5,16 @@ or artifact bundles directly.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
+from sync_workbench.core.tables import align_to_spec
 from sync_workbench.storage.artifact_store import ArtifactStore
 from sync_workbench.storage.jsonl_index import IndexedJsonlReader
 from sync_workbench.storage.ragged_npz import RaggedNpzReader
@@ -23,7 +27,7 @@ class PayloadService:
         self.artifact_store = ArtifactStore(artifact_root)
         self._npz_cache: dict[Path, RaggedNpzReader] = {}
         self._jsonl_cache: dict[Path, IndexedJsonlReader] = {}
-        self._sample_artifacts_cache: pd.DataFrame | None = None
+        self._bounds_cache: dict[tuple[str, str, str], tuple[int, int]] = {}
 
     def get_sample_artifact_rows(
         self,
@@ -31,19 +35,52 @@ class PayloadService:
         run_id: str,
         device_type: str,
         sample_index: int,
+        *,
+        point_cloud_version_id: str | None = None,
     ) -> pd.DataFrame:
-        if self._sample_artifacts_cache is None:
-            self._sample_artifacts_cache = self.store.read_table("SAMPLE_ARTIFACT")
-        artifacts = self._sample_artifacts_cache
-        if artifacts.empty:
-            return artifacts
-        mask = (
-            (artifacts["subject_id"].astype(str) == str(subject_id))
-            & (artifacts["run_id"].astype(str) == str(run_id))
-            & (artifacts["device_type"].astype(str) == str(device_type))
-            & (pd.to_numeric(artifacts["sample_index"], errors="coerce").astype("Int64") == int(sample_index))
-        )
-        return artifacts.loc[mask].copy()
+        return self._sample_rows("SAMPLE_ARTIFACT", subject_id, run_id, device_type, sample_index, point_cloud_version_id)
+
+    def _sample_rows(self, table, subject, run, device, sample, version):
+        with closing(sqlite3.connect(self.store.path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+            where = "subject_id=? AND run_id=? AND device_type=? AND sample_index=?"
+            params = [subject, run, device, int(sample)]
+            if device == "radar_pc":
+                version = version or "online_original"
+            elif device == "radar_raw" and version is None:
+                if "point_cloud_version_id" in cols:
+                    registered = {r[0] for r in conn.execute("SELECT point_cloud_version_id FROM POINT_CLOUD_VERSION WHERE subject_id=? AND run_id=? AND device_type=?", params[:3])}
+                    if registered - {"raw_legacy"}:
+                        raise ValueError("Select point_cloud_version_id explicitly for offline raw payloads")
+                version = "raw_legacy"
+            elif device not in {"radar_pc", "radar_raw"}:
+                if version:
+                    raise ValueError("Point-cloud versions only apply to radar payloads")
+                version = ""
+            if "point_cloud_version_id" in cols:
+                if device == "radar_raw" and version != "raw_legacy":
+                    found = conn.execute("SELECT 1 FROM POINT_CLOUD_VERSION WHERE subject_id=? AND run_id=? AND device_type=? AND point_cloud_version_id=?", (*params[:3], version)).fetchone()
+                    if found is None:
+                        raise KeyError("Point-cloud version is not registered for this acquisition")
+                where += " AND point_cloud_version_id=?"
+                params.append(version)
+            rows = align_to_spec(table, pd.read_sql_query(f'SELECT * FROM "{table}" WHERE ' + where, conn, params=params))
+            return rows[rows.point_cloud_version_id == version].copy()
+
+    def list_point_cloud_versions(self, subject_id, run_id, device_type):
+        with closing(sqlite3.connect(self.store.path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            return pd.read_sql_query("SELECT * FROM POINT_CLOUD_VERSION WHERE subject_id=? AND run_id=? AND device_type=? ORDER BY point_cloud_version_id", conn, params=(subject_id, run_id, device_type))
+
+    def get_sample_summary(self, subject_id, run_id, device_type, sample_index, *, point_cloud_version_id=None):
+        rows = self._sample_rows("SAMPLE_SUMMARY", subject_id, run_id, device_type, sample_index, point_cloud_version_id)
+        if len(rows) > 1:
+            raise ValueError("Duplicate versioned sample summary")
+        return {} if rows.empty else rows.iloc[0].to_dict()
+
+    def clear_cache(self):
+        self._npz_cache.clear()
+        self._jsonl_cache.clear()
+        self._bounds_cache.clear()
 
     def available_payload_roles(
         self,
@@ -51,8 +88,10 @@ class PayloadService:
         run_id: str,
         device_type: str,
         sample_index: int,
+        *,
+        point_cloud_version_id: str | None = None,
     ) -> list[str]:
-        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index)
+        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index, point_cloud_version_id=point_cloud_version_id)
         if rows.empty:
             return []
         return sorted(rows["artifact_role"].astype(str).unique())
@@ -64,13 +103,17 @@ class PayloadService:
         device_type: str,
         sample_index: int,
         artifact_role: str,
+        *,
+        point_cloud_version_id: str | None = None,
     ) -> Any:
-        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index)
+        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index, point_cloud_version_id=point_cloud_version_id)
         rows = rows[rows["artifact_role"].astype(str) == str(artifact_role)]
         if rows.empty:
             raise KeyError(
                 f"No artifact role {artifact_role!r} for {subject_id}/{run_id}/{device_type}/sample {sample_index}."
             )
+        if len(rows) != 1:
+            raise ValueError("Duplicate versioned sample artifact role")
         row = rows.iloc[0]
         return self._read_payload(row)
 
@@ -82,11 +125,14 @@ class PayloadService:
         sample_index: int,
         *,
         roles: list[str] | None = None,
+        point_cloud_version_id: str | None = None,
     ) -> dict[str, Any]:
-        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index)
+        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, sample_index, point_cloud_version_id=point_cloud_version_id)
         if roles is not None:
             wanted = set(map(str, roles))
             rows = rows[rows["artifact_role"].astype(str).isin(wanted)]
+        if rows.artifact_role.duplicated().any():
+            raise ValueError("Duplicate versioned sample artifact role")
         out: dict[str, Any] = {}
         for row in rows.itertuples(index=False):
             out[str(row.artifact_role)] = self._read_payload(row)
@@ -101,6 +147,7 @@ class PayloadService:
         artifact_role: str,
         *,
         radius: int = 0,
+        point_cloud_version_id: str | None = None,
         min_sample_index: int | None = None,
         max_sample_index: int | None = None,
     ) -> Any:
@@ -116,7 +163,7 @@ class PayloadService:
         if max_sample_index is not None:
             end_sample = min(int(max_sample_index), end_sample)
 
-        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, center)
+        rows = self.get_sample_artifact_rows(subject_id, run_id, device_type, center, point_cloud_version_id=point_cloud_version_id)
         rows = rows[rows["artifact_role"].astype(str) == str(artifact_role)]
 
         if rows.empty:
@@ -125,6 +172,8 @@ class PayloadService:
                 f"{subject_id}/{run_id}/{device_type}/sample {center}."
             )
 
+        if len(rows) != 1:
+            raise ValueError("Duplicate versioned sample artifact role")
         row = rows.iloc[0]
         artifact_format = str(getattr(row, "artifact_format", ""))
 
@@ -142,6 +191,18 @@ class PayloadService:
             reader = RaggedNpzReader(path)
             self._npz_cache[path] = reader
 
+        if device_type == "radar_raw" and point_cloud_version_id not in (None, "raw_legacy"):
+            run_key = (subject_id, run_id, device_type)
+            if run_key not in self._bounds_cache:
+                with closing(sqlite3.connect(self.store.path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+                    bounds = conn.execute("SELECT MIN(CAST(sample_index AS INTEGER)), MAX(CAST(sample_index AS INTEGER)) FROM RUN_SAMPLE WHERE subject_id=? AND run_id=? AND device_type=?", run_key).fetchone()
+                self._bounds_cache[run_key] = tuple(map(int, bounds))
+            bounds = self._bounds_cache[run_key]
+            start_sample, end_sample = max(start_sample, bounds[0]), min(end_sample, bounds[1])
+            left = np.searchsorted(reader.sample_index, start_sample, side="left")
+            right = np.searchsorted(reader.sample_index, end_sample, side="right")
+            if right - left != max(0, end_sample - start_sample + 1):
+                raise KeyError("Raw cloud window includes unprocessed frames")
         return reader.get_index_range(start_sample, end_sample)
     
     def get_mapped_pair_payloads(
@@ -153,6 +214,8 @@ class PayloadService:
         primary_only: bool = True,
         source_roles: list[str] | None = None,
         target_roles: list[str] | None = None,
+        source_point_cloud_version_id: str | None = None,
+        target_point_cloud_version_id: str | None = None,
     ) -> dict[str, Any]:
         mappings = self.store.read_table("SAMPLE_MAPPING")
         if mappings.empty:
@@ -191,8 +254,8 @@ class PayloadService:
             "mapping": selected.drop(labels=["__rank"], errors="ignore").to_dict(),
             "source": source,
             "target": target,
-            "source_payloads": self.get_sample_payloads(**source, roles=source_roles),
-            "target_payloads": self.get_sample_payloads(**target, roles=target_roles),
+            "source_payloads": self.get_sample_payloads(**source, roles=source_roles, point_cloud_version_id=source_point_cloud_version_id),
+            "target_payloads": self.get_sample_payloads(**target, roles=target_roles, point_cloud_version_id=target_point_cloud_version_id),
         }
 
     def _read_payload(self, row: Any) -> Any:

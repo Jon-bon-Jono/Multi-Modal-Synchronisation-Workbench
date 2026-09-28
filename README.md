@@ -10,6 +10,7 @@ v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and arti
   - `device_runs.zst`
   - `rgb_samples.zst`
   - `radar_pc_samples.zst`
+  - `radar_raw_samples.zst` (optional)
 - Creates canonical tables:
   - `SUBJECT`
   - `DEVICE_RUN`
@@ -29,6 +30,7 @@ v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and arti
   - `rgb_smartcup_os_from_pts`
   - `radar_pc_observed_wallclock`
   - `radar_pc_linear_from_index`
+  - `radar_raw_wallclock_from_start_end`
 - Generates nearest-time RGB-to-radar mappings with top-k candidates.
 - Stores mapping provenance through `SYNC_MODEL -> MAPPING_VERSION -> SAMPLE_MAPPING`.
 - Exports reports and optional Parquet/CSV canonical tables.
@@ -71,6 +73,14 @@ failed Parquet target.
 
 ## Ingest temporary files
 
+**Versioned offline raw clouds:** the new ETL producer/package contract is
+documented in [raw point-cloud packages](docs/raw_point_cloud_package.md).
+The backend now supports `migrate-point-clouds` (to a new database copy),
+`import-raw-point-clouds`, and version-aware payload access/auditing. The GUI
+selects a fixed cloud source/version before launch and records it in anchor/export
+provenance. Use the workflow in that document; the legacy commands below reject
+the new versioned package.
+
 ```bash
 syncwb ingest-temp \
   --input path/to/temp_ingestion_folder \
@@ -79,6 +89,16 @@ syncwb ingest-temp \
   --reports reports
 ```
 * running this consecutive times will wipe all tables
+
+To add or refresh only `radar_raw_samples.zst` in an existing database while
+preserving mappings and anchors, use:
+
+```bash
+syncwb ingest-raw-temp \
+  --input path/to/temp_ingestion_folder \
+  --sqlite workbench.sqlite \
+  --reports reports/raw_ingestion
+```
 
 ## Inspect store summary
 
@@ -118,6 +138,33 @@ artifact_store/
 ```
 
 The `.npz` files use a ragged bundle layout with `sample_index`, `offsets`, and concatenated `values`. This avoids one file per frame and keeps payloads outside the canonical core tables.
+
+Raw-radar artifacts are not built by default. The existing `--devices radar_raw`
+path supports the legacy single-payload format only. Versioned offline clouds
+use the separate [versioned import workflow](docs/raw_point_cloud_package.md),
+which constructs immutable bundles and preserves captured-frame identities.
+
+## Export a point-cloud/raw-radar test sequence
+
+The short-lived exporter accepts original one-based RGB and point-cloud frame
+ranges and an RGB-to-PC mapping version:
+
+```bash
+python scripts/export_pc_raw_sequence.py \
+  --sqlite workbench.sqlite \
+  --artifact-root artifact_store \
+  --output exported_sequences \
+  --sequence-name 19_MM_example \
+  --subject 19_MM \
+  --mapping-version piecewise_rgb_to_pc_v001_map \
+  --rgb-start-frame 1000 --rgb-end-frame 2000 \
+  --pc-start-frame 1300 --pc-end-frame 2700
+```
+
+Run it once per desired sequence. Each output directory contains
+`point_clouds.npz`, `rgb_pose2d.npz`, `rgb_pose3d.npz`, `frame_links.csv`,
+`metadata.json`, and a handoff `README.md` explaining how another project
+should load the clouds and poses and locate parsed raw frames.
 
 ## Audit payload artifacts
 
@@ -253,7 +300,12 @@ The v0.2.2 patched GUI exposes independent source controls, independent target c
 
 The visualisation controls are also experimental but useful for anchoring. The point-cloud panel can colour radar points by SNR or Doppler, toggle removal of noisy GTRACK points, and overlay the current source 3D Kinect pose in radar point-cloud coordinates. Noisy radar points are defined as target ID NaN, 253, 254, or 255. The RGB panel can toggle the 2D pose overlay, toggle the current target radar point cloud projected into the Kinect digital image frame, and toggle the video frame itself. Turning video frames off avoids MP4 decoding while still allowing 2D pose and projected-radar overlays to be shown on a blank canvas.
 
-A practical startup detail: when the GUI opens, the target sample starts at 0. If the initial mapping says source sample 0 corresponds to a later target sample, press `sync target to source` before using `play both`.
+The GUI starts at the first source/target pair in the selected mapping. Its sample
+boxes match the displayed frames. A launch dialog chooses the cloud source,
+version, and compatible mapping; the choice stays fixed for the session. Passing
+both `--mapping-version` and `--point-cloud-version` selects a session directly.
+For the prepared 19_MM trial, use `scripts/syncwb/anchoring_gui_versioned_19_MM.bat`;
+see [trial paths and provenance](docs/03_workflows_and_usage.md#171-prepared-19_mm-trial).
 
 ## Generate an initial RGB-to-radar mapping for one source/target run pair
 

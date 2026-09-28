@@ -1,0 +1,11 @@
+python scripts\export_pc_raw_sequence.py ^
+  --sqlite workbench.sqlite ^
+  --artifact-root artifact_store ^
+  --output exported_sequences ^
+  --sequence-name 07_SW_enter_stand ^
+  --subject 07_SW ^
+  --mapping-version initial_rgb_to_pc_v001__07_SW__Session-2023-November-27_14-11-02-690792__Session-2023-November-27_13-59-35-723243 ^
+  --rgb-start-frame 270 ^
+  --rgb-end-frame 378 ^
+  --pc-start-frame 4679 ^
+  --pc-end-frame 4823

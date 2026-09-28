@@ -278,6 +278,24 @@ TABLE_SPECS: dict[str, TableSpec] = {
 }
 
 
+# Payload versions are deliberately absent from acquisition/anchor/mapping keys.
+for _name in ("RUN_ASSET", "SAMPLE_ARTIFACT", "SAMPLE_SUMMARY"):
+    _spec = TABLE_SPECS[_name]
+    TABLE_SPECS[_name] = TableSpec(
+        _name, _spec.columns + ("point_cloud_version_id",) + (("point_status",) if _name == "SAMPLE_SUMMARY" else ()),
+        _spec.required, _spec.key + (("point_cloud_version_id",) if _name != "RUN_ASSET" else ()),
+    )
+
+TABLE_SPECS["POINT_CLOUD_VERSION"] = TableSpec(
+    "POINT_CLOUD_VERSION",
+    ("subject_id", "run_id", "device_type", "point_cloud_version_id", "readable_label",
+     "payload_fingerprint", "acquisition_timeline_sha256", "artifact_ref", "artifact_sha256",
+     "provenance_json", "created_at"),
+    ("subject_id", "run_id", "device_type", "point_cloud_version_id"),
+    ("subject_id", "run_id", "device_type", "point_cloud_version_id"),
+)
+
+
 def empty_canonical_tables(names: Iterable[str] | None = None) -> dict[str, pd.DataFrame]:
     selected = names or TABLE_SPECS.keys()
     return {name: TABLE_SPECS[name].empty() for name in selected}
@@ -290,4 +308,12 @@ def align_to_spec(name: str, df: pd.DataFrame) -> pd.DataFrame:
     for col in spec.columns:
         if col not in out.columns:
             out[col] = pd.NA
+    if name in {"RUN_ASSET", "SAMPLE_ARTIFACT", "SAMPLE_SUMMARY"}:
+        missing = out["point_cloud_version_id"].fillna("").eq("")
+        defaults = out["device_type"].map({"radar_pc": "online_original", "radar_raw": "raw_legacy"}).fillna("")
+        out.loc[missing, "point_cloud_version_id"] = defaults[missing]
+        if name == "SAMPLE_SUMMARY":
+            missing_status = out["point_status"].fillna("").eq("")
+            out.loc[missing_status, "point_status"] = out.loc[missing_status, "device_type"].map(
+                {"radar_pc": "available", "radar_raw": "available"}).fillna("")
     return out.loc[:, list(spec.columns)]

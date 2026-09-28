@@ -39,4 +39,7 @@ def test_point_rgba_and_projection_smoke():
     assert rgba.shape == (2, 4)
     projected = project_pc_to_digital(points, filter_noise=False)
     assert projected.ndim == 2
-    assert projected.shape[1] == 2
+    assert projected.shape == (2, 6)
+    assert np.isfinite(projected[:, :2]).all()
+    np.testing.assert_array_equal(projected[:, 2:], points[:, 2:])
+    assert project_pc_to_digital(np.empty((0, 6), np.float32)).shape == (0, 6)

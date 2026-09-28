@@ -41,6 +41,17 @@ REQUIRED_RADAR_PC_SAMPLES = (
     "observed_wallclock",
 )
 
+REQUIRED_RADAR_RAW_SAMPLES = (
+    "subject_id",
+    "run_id",
+    "frame_number",
+    "sample_kind",
+    "estimated_wallclock_from_start_end",
+    "points",
+    "point_count",
+    "point_count_filtered",
+)
+
 
 def _missing(df: pd.DataFrame, cols: tuple[str, ...]) -> list[str]:
     return [c for c in cols if c not in df.columns]
@@ -50,6 +61,7 @@ def validate_temp_inputs(
     device_runs: pd.DataFrame,
     rgb_samples: pd.DataFrame | None,
     radar_pc_samples: pd.DataFrame | None,
+    radar_raw_samples: pd.DataFrame | None = None,
 ) -> list[InputValidationIssue]:
     issues: list[InputValidationIssue] = []
     miss = _missing(device_runs, REQUIRED_DEVICE_RUNS)
@@ -69,6 +81,13 @@ def validate_temp_inputs(
         miss = _missing(radar_pc_samples, REQUIRED_RADAR_PC_SAMPLES)
         if miss:
             issues.append(InputValidationIssue("error", "radar_pc_samples.zst", f"Missing required columns: {miss}"))
+
+    if radar_raw_samples is None:
+        issues.append(InputValidationIssue("warning", "radar_raw_samples.zst", "File not found; raw radar ingestion skipped."))
+    else:
+        miss = _missing(radar_raw_samples, REQUIRED_RADAR_RAW_SAMPLES)
+        if miss:
+            issues.append(InputValidationIssue("error", "radar_raw_samples.zst", f"Missing required columns: {miss}"))
 
     return issues
 

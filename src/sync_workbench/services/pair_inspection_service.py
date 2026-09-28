@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 from sync_workbench.services.payload_service import PayloadService
 from sync_workbench.storage.sqlite_store import SQLiteCoreStore
@@ -24,6 +23,8 @@ class PairInspectionService:
         subject_id: str | None = None,
         primary_only: bool = True,
         include_payloads: bool = False,
+        source_point_cloud_version_id: str | None = None,
+        target_point_cloud_version_id: str | None = None,
     ) -> dict[str, Any]:
         subject = subject_id or self._infer_unique_subject(mapping_version_id)
         pair = self.payloads.get_mapped_pair_payloads(
@@ -31,9 +32,11 @@ class PairInspectionService:
             mapping_version_id,
             source_sample_index,
             primary_only=primary_only,
+            source_point_cloud_version_id=source_point_cloud_version_id,
+            target_point_cloud_version_id=target_point_cloud_version_id,
         )
-        source_summary = self._summary_row(**pair["source"])
-        target_summary = self._summary_row(**pair["target"])
+        source_summary = self.payloads.get_sample_summary(**pair["source"], point_cloud_version_id=source_point_cloud_version_id)
+        target_summary = self.payloads.get_sample_summary(**pair["target"], point_cloud_version_id=target_point_cloud_version_id)
         out = {
             "mapping": pair["mapping"],
             "source": {**pair["source"], "summary": source_summary, "payload_roles": sorted(pair["source_payloads"].keys())},
@@ -59,18 +62,6 @@ class PairInspectionService:
             )
         return subjects[0]
 
-    def _summary_row(self, subject_id: str, run_id: str, device_type: str, sample_index: int) -> dict[str, Any]:
-        summary = self.store.read_table("SAMPLE_SUMMARY")
-        if summary.empty:
-            return {}
-        mask = (
-            (summary["subject_id"].astype(str) == str(subject_id))
-            & (summary["run_id"].astype(str) == str(run_id))
-            & (summary["device_type"].astype(str) == str(device_type))
-            & (pd.to_numeric(summary["sample_index"], errors="coerce").astype("Int64") == int(sample_index))
-        )
-        rows = summary.loc[mask]
-        return {} if rows.empty else rows.iloc[0].to_dict()
 
 
 def _describe_payload(payload: Any) -> dict[str, Any]:

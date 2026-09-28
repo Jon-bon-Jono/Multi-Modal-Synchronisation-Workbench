@@ -16,6 +16,7 @@ from sync_workbench.ingestion.temp_package import TempPackage
 from sync_workbench.storage.artifact_store import ArtifactStore
 from sync_workbench.storage.jsonl_index import IndexedJsonlWriter
 from sync_workbench.storage.ragged_npz import RaggedNpzWriter
+from sync_workbench.storage.point_cloud_migration import migrate_point_cloud_versions
 from sync_workbench.storage.sqlite_store import SQLiteCoreStore
 
 
@@ -44,6 +45,7 @@ class ArtifactBuildService:
     ) -> ArtifactBuildResult:
         package = TempPackage.read(input_temp)
         store = SQLiteCoreStore(sqlite_path)
+        migrate_point_cloud_versions(sqlite_path)
         artifact_store = ArtifactStore(artifact_root)
         created_at = utc_now_str()
         allowed_devices = set(devices or ["kinect_rgb", "radar_pc"])
@@ -71,8 +73,33 @@ class ArtifactBuildService:
             if subject_id is not None:
                 pc = pc[pc["subject_id"].astype(str) == str(subject_id)]
             for (subj, run_id), group in pc.groupby(["subject_id", "run_id"], sort=False):
-                assets, artifacts, summary, rows = self._build_radar_pc_run(
-                    artifact_store, group, str(subj), str(run_id), created_at, overwrite=overwrite
+                assets, artifacts, summary, rows = self._build_radar_run(
+                    artifact_store,
+                    group,
+                    str(subj),
+                    str(run_id),
+                    created_at,
+                    device_type="radar_pc",
+                    overwrite=overwrite,
+                )
+                run_assets.extend(assets)
+                sample_artifacts.extend(artifacts)
+                sample_summary.extend(summary)
+                report_rows.extend(rows)
+
+        if "radar_raw" in allowed_devices and package.radar_raw_samples is not None:
+            raw = _prepare_samples(package.radar_raw_samples, "radar_raw")
+            if subject_id is not None:
+                raw = raw[raw["subject_id"].astype(str) == str(subject_id)]
+            for (subj, run_id), group in raw.groupby(["subject_id", "run_id"], sort=False):
+                assets, artifacts, summary, rows = self._build_radar_run(
+                    artifact_store,
+                    group,
+                    str(subj),
+                    str(run_id),
+                    created_at,
+                    device_type="radar_raw",
+                    overwrite=overwrite,
                 )
                 run_assets.extend(assets)
                 sample_artifacts.extend(artifacts)
@@ -98,6 +125,7 @@ class ArtifactBuildService:
         if not sample_summary_df.empty:
             store.replace_or_append_without_key_conflicts("SAMPLE_SUMMARY", sample_summary_df)
 
+        migrate_point_cloud_versions(sqlite_path)
         reports = {
             "artifact_build_summary": pd.DataFrame(report_rows),
             "table_counts": pd.DataFrame(
@@ -199,7 +227,7 @@ class ArtifactBuildService:
         summary_rows = [_rgb_summary_row(row, created_at) for row in group.itertuples(index=False)]
         return run_assets, sample_artifacts, summary_rows, report_rows
 
-    def _build_radar_pc_run(
+    def _build_radar_run(
         self,
         artifact_store: ArtifactStore,
         group: pd.DataFrame,
@@ -207,9 +235,9 @@ class ArtifactBuildService:
         run_id: str,
         created_at: str,
         *,
+        device_type: str,
         overwrite: bool,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        device_type = "radar_pc"
         run_assets: list[dict[str, Any]] = []
         sample_artifacts: list[dict[str, Any]] = []
         report_rows: list[dict[str, Any]] = []
@@ -248,7 +276,10 @@ class ArtifactBuildService:
         if manifest_asset is not None:
             run_assets.append(manifest_asset)
 
-        summary_rows = [_radar_pc_summary_row(row, created_at) for row in group.itertuples(index=False)]
+        summary_rows = [
+            _radar_summary_row(row, created_at, device_type)
+            for row in group.itertuples(index=False)
+        ]
         return run_assets, sample_artifacts, summary_rows, report_rows
 
     def _write_manifest(
@@ -400,12 +431,12 @@ def _rgb_summary_row(row: Any, created_at: str) -> dict[str, Any]:
     }
 
 
-def _radar_pc_summary_row(row: Any, created_at: str) -> dict[str, Any]:
+def _radar_summary_row(row: Any, created_at: str, device_type: str) -> dict[str, Any]:
     point_n = _first_dim(getattr(row, "points", None), (6,))
     return {
         "subject_id": str(row.subject_id),
         "run_id": str(row.run_id),
-        "device_type": "radar_pc",
+        "device_type": device_type,
         "sample_index": int(row.sample_index),
         "num_people": pd.NA,
         "num_2d": pd.NA,
@@ -418,5 +449,5 @@ def _radar_pc_summary_row(row: Any, created_at: str) -> dict[str, Any]:
         "has_activity": False,
         "has_points": bool(point_n > 0),
         "created_at": created_at,
-        "notes": "derived from radar_pc_samples payload columns",
+        "notes": f"derived from {device_type}_samples payload columns",
     }

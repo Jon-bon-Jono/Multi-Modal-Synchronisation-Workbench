@@ -368,7 +368,7 @@ def project_pc_to_digital(points: np.ndarray | None, *, filter_noise: bool = Fal
     """
     arr = valid_points(points, filter_noise=filter_noise)
     if arr.size == 0:
-        return np.empty((0, 2), dtype=float)
+        return np.empty((0, 6), dtype=float)
     if max_points is not None and arr.shape[0] > int(max_points):
         step = max(1, int(math.ceil(arr.shape[0] / int(max_points))))
         arr = arr[::step]

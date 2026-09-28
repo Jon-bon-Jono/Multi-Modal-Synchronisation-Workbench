@@ -69,6 +69,14 @@ class TempToCanonicalTransformer:
             sample_time_frames.append(pc_times)
             reports.update(pc_reports)
 
+        if self.package.radar_raw_samples is not None:
+            raw = self._prepare_radar_raw_samples(self.package.radar_raw_samples)
+            sample_frames.append(self._run_samples_from_prepared(raw, "radar_raw"))
+            raw_models, raw_times, raw_reports = self._radar_raw_timeline_tables(raw)
+            timeline_model_frames.append(raw_models)
+            sample_time_frames.append(raw_times)
+            reports.update(raw_reports)
+
         if sample_frames:
             tables["RUN_SAMPLE"] = align_to_spec("RUN_SAMPLE", pd.concat(sample_frames, ignore_index=True))
         if run_asset_frames:
@@ -87,6 +95,36 @@ class TempToCanonicalTransformer:
         reports["table_counts"] = self._table_counts(tables)
         reports["device_run_summary"] = self._device_run_summary(tables)
         reports["asset_path_warnings"] = self._asset_path_warnings(tables.get("RUN_ASSET", TABLE_SPECS["RUN_ASSET"].empty()))
+        return TransformResult(tables=tables, reports=reports)
+
+    def transform_radar_raw(self) -> TransformResult:
+        """Transform only raw-radar rows for additive ingestion.
+
+        This deliberately returns a small subset of canonical tables so an
+        existing workbench can gain raw samples without replacing mappings,
+        anchors, or already-built artifact metadata.
+        """
+        if self.package.radar_raw_samples is None:
+            raise FileNotFoundError(
+                f"radar_raw_samples.zst was not found under {self.package.root}"
+            )
+
+        raw = self._prepare_radar_raw_samples(self.package.radar_raw_samples)
+        raw_run_keys = raw[["subject_id", "run_id"]].drop_duplicates()
+        device_runs = self._device_runs()
+        device_runs = device_runs[
+            device_runs["device_type"].astype(str) == "radar_raw"
+        ].merge(raw_run_keys, on=["subject_id", "run_id"], how="inner")
+
+        models, times, reports = self._radar_raw_timeline_tables(raw)
+        tables = {
+            "DEVICE_RUN": align_to_spec("DEVICE_RUN", device_runs),
+            "RUN_SAMPLE": self._run_samples_from_prepared(raw, "radar_raw"),
+            "RUN_TIMELINE_MODEL": models,
+            "SAMPLE_TIME_ESTIMATE": times,
+        }
+        reports["table_counts"] = self._table_counts(tables)
+        reports["device_run_summary"] = self._device_run_summary(tables)
         return TransformResult(tables=tables, reports=reports)
 
     def _subjects(self) -> pd.DataFrame:
@@ -119,6 +157,14 @@ class TempToCanonicalTransformer:
     def _prepare_radar_pc_samples(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         out["device_type"] = "radar_pc"
+        out = out.sort_values(["subject_id", "run_id", "frame_number"]).reset_index(drop=False)
+        out["sample_index"] = out.groupby(["subject_id", "run_id"]).cumcount().astype(int)
+        out["source_frame_number"] = out["frame_number"]
+        return out
+
+    def _prepare_radar_raw_samples(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out["device_type"] = "radar_raw"
         out = out.sort_values(["subject_id", "run_id", "frame_number"]).reset_index(drop=False)
         out["sample_index"] = out.groupby(["subject_id", "run_id"]).cumcount().astype(int)
         out["source_frame_number"] = out["frame_number"]
@@ -523,6 +569,54 @@ class TempToCanonicalTransformer:
             align_to_spec("RUN_TIMELINE_MODEL", pd.DataFrame(model_rows)),
             align_to_spec("SAMPLE_TIME_ESTIMATE", pd.DataFrame(time_rows)),
             reports,
+        )
+
+    def _radar_raw_timeline_tables(self, raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+        model_rows: list[dict[str, Any]] = []
+        time_rows: list[dict[str, Any]] = []
+        device_runs = self._device_runs().set_index(["subject_id", "run_id", "device_type"])
+
+        for (subject_id, run_id), group in raw.groupby(["subject_id", "run_id"], sort=False):
+            device_type = "radar_raw"
+            run_key = (subject_id, run_id, device_type)
+            reference_time = ""
+            if run_key in device_runs.index:
+                reference_time = device_runs.loc[run_key, "start_wallclock_est"]
+
+            model_rows.append(
+                self._timeline_model_row(
+                    subject_id,
+                    run_id,
+                    device_type,
+                    "radar_raw_wallclock_from_start_end",
+                    "Raw radar wallclock interpolated between run start and end",
+                    "interpolated_start_end",
+                    "estimated_wallclock_from_start_end",
+                    {"dense": True, "coordinate": "wallclock"},
+                    "Frame times are uniform estimates constrained to the logged first and last frame times.",
+                )
+            )
+            for row in group.itertuples(index=False):
+                time_rows.append(
+                    self._time_row(
+                        subject_id,
+                        run_id,
+                        device_type,
+                        "radar_raw_wallclock_from_start_end",
+                        row.sample_index,
+                        "estimated_wallclock",
+                        time_value_datetime=format_datetime(
+                            row.estimated_wallclock_from_start_end
+                        ),
+                        reference_time_datetime=reference_time,
+                        notes="uniform_interpolation_from_logged_start_end",
+                    )
+                )
+
+        return (
+            align_to_spec("RUN_TIMELINE_MODEL", pd.DataFrame(model_rows)),
+            align_to_spec("SAMPLE_TIME_ESTIMATE", pd.DataFrame(time_rows)),
+            {},
         )
 
     def _table_counts(self, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:

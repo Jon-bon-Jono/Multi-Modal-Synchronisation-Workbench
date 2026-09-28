@@ -1,5 +1,11 @@
 # 05 — Workflows and Usage
 
+> Versioned offline raw-cloud packaging is specified in
+> [raw_point_cloud_package.md](raw_point_cloud_package.md). Its producer and version-aware backend
+> are implemented, including fixed GUI session selection and anchor display
+> provenance. Acquisition samples, anchor endpoints, and mappings remain
+> independent of raw processing version.
+
 **Status:** Operational usage note  
 **Purpose of this file:** Describe how the workbench should be used in practice. This file complements the main context file and the schema file.
 
@@ -540,3 +546,47 @@ The v0.2.2 patched experimental GUI provides separate controls for the source st
 
 The GUI also provides synchronisation-assist actions (`sync target to source` and `sync source to target`), canonical anchor creation, selected-anchor deletion, anchor export, and a finish-session action. Frame movement should not reload the anchor table from SQLite; the anchor table is refreshed only after anchor actions or initial load.
 
+
+## 17. Versioned offline raw point clouds
+
+Use `migrate-point-clouds` to create a migrated database copy, then
+`import-raw-point-clouds` to validate and add the new raw package and its bundles.
+The [complete workflow](raw_point_cloud_package.md#backend-workflow) covers the
+artifact-root copy, commands, version selection, audit, and recovery limits.
+The legacy raw-index ingestion and artifact builder reject versioned packages.
+The GUI chooses a source/version/mapping before the session opens and records
+its selection in anchor/export provenance; it cannot switch mid-session.
+
+
+### 17.1 Prepared 19_MM trial
+
+Use `scripts/syncwb/anchoring_gui_versioned_19_MM.bat` from the active SyncWB
+Conda environment on this Windows machine. It opens the launch dialog with the
+raw acquisition preselected, using:
+
+- `%USERPROFILE%/Documents/SyncWB/backend_validation/workbench_raw_validation.sqlite`
+- `%USERPROFILE%/Documents/SyncWB/backend_validation/artifact_store`
+- `D:/smart_cup_recordings/Kinect` for read-only RGB decoding.
+
+The prepared copy now contains `initial_rgb_to_raw_v001`, an initial nearest-time
+navigation mapping from the 19_MM RGB run to the raw acquisition. Existing online
+mappings and anchors are retained. Test-created anchors are confined to a separate
+GUI test database, not this prepared copy. The original live `workbench.sqlite`
+and its original artifact store have not been replaced. Anchors you create with
+this trial launcher are saved into the prepared copy; keep/export them when
+transitioning to a final working database.
+
+Equivalent cross-platform command (replace paths and annotator as appropriate):
+
+```bash
+syncwb anchoring-gui --sqlite "<prepared-database>" --artifact-root "<artifact-root>" --rgb-root "<Kinect-root>" --subject 19_MM --mapping-version initial_rgb_to_raw_v001 --annotator-id JW01
+```
+
+To reproduce the raw navigation mapping on a newly migrated database:
+
+```bash
+syncwb map-nearest --sqlite "<prepared-database>" --subject 19_MM --source-run "Session-2024-January-15 09-47-41-274452" --source-device kinect_rgb --source-timeline rgb_wallclock_from_pts --target-run "Session-2024-January-15 09-43-27-126274" --target-device radar_raw --target-timeline radar_raw_wallclock_from_start_end --mapping-version initial_rgb_to_raw_v001 --top-k 3 --source-window-policy target-overlap --primary-policy supported-only
+```
+
+See [the display-provenance contract](raw_point_cloud_package.md#gui-sessions-and-anchor-display-provenance)
+for mixed-version anchor exports, missing frames, and prediction-overlay limits.

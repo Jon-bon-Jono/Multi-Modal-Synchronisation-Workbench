@@ -1,5 +1,11 @@
 # 03 — Data Model and Tables
 
+> Versioned offline raw-cloud packaging is specified in
+> [raw_point_cloud_package.md](raw_point_cloud_package.md). Its producer and version-aware backend
+> are implemented, including fixed GUI session selection and anchor display
+> provenance. Acquisition samples, anchor endpoints, and mappings remain
+> independent of raw processing version.
+
 **Status:** Canonical schema note for the current design stage  
 **Purpose of this file:** Define the concrete tables, columns, keys, and storage conventions for the Multi-Modal Synchronisation Workbench.
 
@@ -873,3 +879,24 @@ The new service-layer behaviour is:
 - RGB video files remain `RUN_ASSET` rows with `asset_role = rgb_video`; they are resolved by a local RGB root and are not stored in `SAMPLE_ARTIFACT`.
 
 For video playback, `RUN_SAMPLE.sample_index` is the canonical zero-based frame position used for seeking. The temporary `rgb_samples.frame_number` field may start at 1 and should not be used as the canonical video-frame seek index.
+
+## 12. Point-cloud payload versions
+
+`POINT_CLOUD_VERSION` is keyed by `(subject_id, run_id, device_type,
+point_cloud_version_id)`. It stores `readable_label`, `payload_fingerprint`,
+`acquisition_timeline_sha256`, `artifact_ref`, `artifact_sha256`, `provenance_json`,
+and `created_at`. `online_original` represents each existing online acquisition;
+legacy processing provenance/hashes are left unavailable, never invented.
+
+`RUN_ASSET`, `SAMPLE_ARTIFACT`, and `SAMPLE_SUMMARY` add
+`point_cloud_version_id`; the latter two include it in their logical keys.
+`RUN_ASSET.asset_id` remains its key; new raw bundle IDs include the version ID.
+Non-cloud rows use an empty version ID. `SAMPLE_SUMMARY.point_status` separates
+`available` from `unprocessed`, whose point counts are null. Migration adds unique
+indexes for the registry and version-aware artifact/summary keys.
+
+Acquisition sample/timeline, anchor endpoint, sync model, and mapping keys do not
+include cloud versions. A raw processing version changes observed payloads, not
+captured samples. Version-aware backend consumers select a payload version using
+the same mapping rows. See [the import contract and workflow](raw_point_cloud_package.md)
+for status, provenance, migration, and GUI/anchor-export behavior.

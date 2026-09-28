@@ -8,6 +8,8 @@ and place/delete/export canonical anchors.
 from __future__ import annotations
 
 from pathlib import Path
+
+import numpy as np
 import time
 
 from sync_workbench.experimental.anchoring_gui.anchor_table import AnchorTable
@@ -98,8 +100,8 @@ def make_main_window_class():
         def __init__(self, controller: AnchoringController):
             super().__init__()
             self.controller = controller
-            self.source_sample = 0
-            self.target_sample = 0
+            self.source_sample, self.target_sample = self.controller.initial_samples()
+            self._target_error = ""
             self.source_playing = False
             self.target_playing = False
             self.both_playing = False
@@ -129,7 +131,12 @@ def make_main_window_class():
             self.source_fps = self.controller.nominal_fps(self.controller.source_run_id, self.controller.source_device_type)
             self.target_fps = self.controller.nominal_fps(self.controller.target_run_id, self.controller.target_device_type)
 
-            self.setWindowTitle("SyncWB experimental anchoring GUI")
+            self.setWindowTitle(f"SyncWB — {self.controller.selection.readable_label} — {self.controller.target_device_type}")
+            self.session_label = QLabel(f"Cloud fixed for this session: {self.controller.selection.source_label} | {self.controller.selection.readable_label}")
+            self.session_label.setWordWrap(True)
+            self.session_label.setToolTip(self.controller.point_cloud_version_id)
+            self.cloud_status = QLabel()
+            self.cloud_status.setWordWrap(True)
             self.video_panel = VideoPanel()
             self.point_panel = PointCloudPanel()
 
@@ -157,6 +164,8 @@ def make_main_window_class():
             self.target_spin.setRange(0, max(0, self.target_max))
             self.target_spin.setKeyboardTracking(False)
             self.target_spin.editingFinished.connect(self.go_target_from_spin)
+            self.source_spin.setValue(self.source_sample)
+            self.target_spin.setValue(self.target_sample)
 
             self.label_edit = QLineEdit()
             self.label_edit.setPlaceholderText("anchor label")
@@ -227,6 +236,7 @@ def make_main_window_class():
         def _build_layout(self):
             root = QWidget()
             outer = QVBoxLayout(root)
+            outer.addWidget(self.session_label)
 
             panels = QHBoxLayout()
             panels.addWidget(self.video_panel, stretch=1)
@@ -235,6 +245,7 @@ def make_main_window_class():
             point_layout = QVBoxLayout(point_container)
             point_layout.setContentsMargins(0, 0, 0, 0)
             point_layout.addWidget(self.point_panel, stretch=1)
+            point_layout.addWidget(self.cloud_status)
             point_layout.addWidget(self.point_colour_legend)
             point_layout.addWidget(self.point_colour_legend_ticks)
 
@@ -254,9 +265,9 @@ def make_main_window_class():
 
             controls_scroll = QScrollArea()
             controls_scroll.setWidget(controls_widget)
-            controls_scroll.setWidgetResizable(False)
+            controls_scroll.setWidgetResizable(True)
             controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             controls_scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
             controls_scroll.setMinimumWidth(0)
             controls_scroll.setMaximumHeight(260)
@@ -385,6 +396,7 @@ def make_main_window_class():
             layout.addWidget(self.notes_edit)
             row1 = QHBoxLayout()
             place = QPushButton("place anchor")
+            self.place_anchor_button = place
             place.clicked.connect(self.place_anchor)
             delete = QPushButton("delete selected")
             delete.clicked.connect(self.delete_selected_anchor)
@@ -666,6 +678,8 @@ def make_main_window_class():
                     self.target_sample,
                     label=self.label_edit.text(),
                     notes=self.notes_edit.text(),
+                    point_window_radius=self.pc_window_radius,
+                    filter_noise=self.filter_noise_points,
                 )
                 self.refresh_anchors()
             except Exception as exc:
@@ -891,7 +905,11 @@ def make_main_window_class():
             try:
                 frame = self.controller.get_rgb_frame(self.source_sample) if self.show_video_frames else None
                 pose2d = self.controller.get_source_pose2d(self.source_sample) if self.show_pose2d_overlay else None
-                projected_points = self._current_projected_points() if self.show_projected_pc_overlay else None
+                try:
+                    projected_points = self._current_projected_points() if self.show_projected_pc_overlay else None
+                except KeyError:
+                    # Keep RGB visible when the selected raw frame/window has no cloud.
+                    projected_points = None
                 self.video_panel.set_options(
                     show_video=self.show_video_frames,
                     show_pose2d=self.show_pose2d_overlay,
@@ -901,8 +919,10 @@ def make_main_window_class():
                 self.video_panel.set_scene(frame_rgb=frame, pose2d=pose2d, projected_points=projected_points)
             except Exception as exc:
                 self.video_panel.setText(f"RGB/overlay unavailable: {exc}")
+                print(f"RGB/overlay unavailable: {exc}")
 
         def refresh_target(self) -> None:
+            self._target_error = ""
             try:
                 pose3d = (
                     self.controller.get_source_pose3d(self.source_sample)
@@ -925,13 +945,24 @@ def make_main_window_class():
                     show_pose3d=self.show_pose3d_in_pointcloud,
                     show_predicted_pose3d=self.show_predicted_pose3d_in_pointcloud,
                 )
-                self.point_panel.set_scene(
-                    self._current_target_points(),
-                    pose3d=pose3d,
-                    predicted_pose3d=predicted_pose3d,
-                )
+                points = self._current_target_points()
+                self.point_panel.set_scene(points, pose3d=pose3d, predicted_pose3d=predicted_pose3d)
+                shown = len(filter_noise_points(points)) if self.filter_noise_points else len(points)
+                coverage = "empty processed frame" if len(points) == 0 else f"{len(points):,} points; {shown:,} displayed"
+                self.cloud_status.setText(f"{coverage} | window ±{self.pc_window_radius} frames")
+                self.place_anchor_button.setEnabled(True)
             except Exception as exc:
-                self.status.setText(f"Radar points/pose overlay unavailable: {exc}")
+                # Never leave the previous frame visible when the new cloud/window is missing.
+                self.point_panel.set_scene(np.empty((0, 6), dtype=np.float32))
+                self._clear_point_window_caches()
+                try:
+                    summary = self.controller.get_target_summary(self.target_sample)
+                except Exception:
+                    summary = {}
+                reason = "Frame was not processed in this cloud version" if summary.get("point_status") == "unprocessed" else str(exc)
+                self._target_error = f"Cloud unavailable: {reason}"
+                self.cloud_status.setText(self._target_error)
+                self.place_anchor_button.setEnabled(False)
 
         def refresh_status(self) -> None:
             mapping_text = "mapping unavailable"
@@ -969,7 +1000,7 @@ def make_main_window_class():
             self.status.setText(
                 f"source {self.controller.source_device_type}/{self.controller.source_run_id} sample={self.source_sample} "
                 f"of {self.source_max}; target {self.controller.target_device_type}/{self.controller.target_run_id} "
-                f"sample={self.target_sample} of {self.target_max}; {mapping_text}{prediction_text}"
+                f"sample={self.target_sample} of {self.target_max}; {mapping_text}{prediction_text}; {self._target_error}"
             )
 
         def refresh_anchors(self) -> None:

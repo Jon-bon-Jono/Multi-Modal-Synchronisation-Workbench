@@ -5,6 +5,9 @@ import argparse
 import json
 from pathlib import Path
 
+from sync_workbench.services.raw_point_cloud_import_service import RawPointCloudImportService
+from sync_workbench.services.payload_service import PayloadService
+from sync_workbench.storage.point_cloud_migration import migrate_database_copy
 from sync_workbench.services.artifact_audit_service import ArtifactAuditService
 from sync_workbench.services.artifact_build_service import ArtifactBuildService
 from sync_workbench.services.ingestion_service import IngestionService
@@ -21,11 +24,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="syncwb", description="Multi-modal Synchronisation Workbench backend CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    migrate = sub.add_parser("migrate-point-clouds", help="Copy an existing database and register explicit cloud versions")
+    migrate.add_argument("--source-sqlite", required=True)
+    migrate.add_argument("--output-sqlite", required=True, help="New path; existing files are never replaced")
+    raw_clouds = sub.add_parser("import-raw-point-clouds", help="Validate and add immutable offline cloud versions")
+    raw_clouds.add_argument("--input", required=True)
+    raw_clouds.add_argument("--sqlite", required=True, help="Migrated database")
+    raw_clouds.add_argument("--artifact-root", required=True)
+    versions = sub.add_parser("list-point-cloud-versions", help="List registered clouds for an acquisition")
+    versions.add_argument("--sqlite", required=True)
+    versions.add_argument("--subject", required=True)
+    versions.add_argument("--run", required=True)
+    versions.add_argument("--device", choices=["radar_pc", "radar_raw"], required=True)
+
     ingest = sub.add_parser("ingest-temp", help="Convert temporary zst ingestion files into a canonical SQLite store")
-    ingest.add_argument("--input", required=True, help="Folder containing device_runs.zst, rgb_samples.zst, radar_pc_samples.zst")
+    ingest.add_argument("--input", required=True, help="Folder containing device_runs.zst and available sample .zst files")
     ingest.add_argument("--sqlite", required=True, help="Output SQLite store path")
     ingest.add_argument("--parquet", default=None, help="Optional output directory for canonical parquet/csv exports")
     ingest.add_argument("--reports", default=None, help="Optional output directory for ingestion reports")
+
+    ingest_raw = sub.add_parser(
+        "ingest-raw-temp",
+        help="Add radar_raw_samples.zst to an existing canonical store without replacing mappings",
+    )
+    ingest_raw.add_argument("--input", required=True, help="Folder containing device_runs.zst and radar_raw_samples.zst")
+    ingest_raw.add_argument("--sqlite", required=True, help="Existing canonical SQLite store path")
+    ingest_raw.add_argument("--reports", default=None, help="Optional output directory for raw-ingestion reports")
 
     summary = sub.add_parser("summary", help="Print row counts for a canonical SQLite store")
     summary.add_argument("--sqlite", required=True, help="SQLite store path")
@@ -35,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_artifacts.add_argument("--sqlite", required=True, help="Canonical SQLite store path created by ingest-temp")
     build_artifacts.add_argument("--artifact-root", required=True, help="Artifact store root directory")
     build_artifacts.add_argument("--subject", default=None, help="Optional subject_id filter")
-    build_artifacts.add_argument("--devices", nargs="+", choices=["kinect_rgb", "radar_pc"], default=None)
+    build_artifacts.add_argument("--devices", nargs="+", choices=["kinect_rgb", "radar_pc", "radar_raw"], default=None)
     build_artifacts.add_argument("--overwrite", action="store_true", help="Replace existing artifact bundle files and metadata rows")
 
     audit_artifacts = sub.add_parser("audit-artifacts", help="Audit v0.2.1 artifact metadata and bundle files")
@@ -50,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_pair.add_argument("--mapping-version", required=True)
     inspect_pair.add_argument("--source-sample", required=True, type=int)
     inspect_pair.add_argument("--include-secondary", action="store_true", help="Allow a non-primary/secondary candidate if it sorts first by rank")
+    inspect_pair.add_argument("--source-point-cloud-version", default=None)
+    inspect_pair.add_argument("--target-point-cloud-version", default=None)
     inspect_pair.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     mapn = sub.add_parser("map-nearest", help="Generate a crude nearest-time mapping intended for anchor-placement/navigation")
@@ -167,7 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--artifact-root", required=True)
     gui.add_argument("--rgb-root", required=True)
     gui.add_argument("--subject", required=True)
-    gui.add_argument("--mapping-version", required=True)
+    gui.add_argument("--mapping-version", default=None, help="Preselect a mapping in the launch dialog")
+    gui.add_argument("--point-cloud-version", default=None, help="Cloud version ID; together with --mapping-version selects the session without a dialog")
     gui.add_argument("--annotator-id", default="")
     gui.add_argument(
         "--pose-predictions",
@@ -192,6 +219,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    if args.command == "migrate-point-clouds":
+        print(json.dumps(migrate_database_copy(args.source_sqlite, args.output_sqlite), indent=2))
+        return 0
+    if args.command == "import-raw-point-clouds":
+        print(json.dumps(RawPointCloudImportService().import_package(args.input, args.sqlite, args.artifact_root), indent=2))
+        return 0
+    if args.command == "list-point-cloud-versions":
+        versions = PayloadService(args.sqlite, ".").list_point_cloud_versions(args.subject, args.run, args.device)
+        print(versions.drop(columns=["provenance_json"]).to_json(orient="records", indent=2))
+        return 0
     if args.command == "ingest-temp":
         result = IngestionService().ingest_temp_package(
             args.input,
@@ -203,6 +240,20 @@ def main(argv: list[str] | None = None) -> int:
         print("Ingestion complete.")
         if counts is not None:
             print(counts.to_string(index=False))
+        return 0
+
+    if args.command == "ingest-raw-temp":
+        try:
+            result = IngestionService().ingest_radar_raw_samples(
+                args.input,
+                args.sqlite,
+                reports_dir=args.reports,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"Error: {exc}")
+            return 2
+        print("Raw radar ingestion complete; existing mappings were preserved.")
+        print(result.reports["table_counts"].to_string(index=False))
         return 0
 
     if args.command == "summary":
@@ -256,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.source_sample,
                 subject_id=args.subject,
                 primary_only=not args.include_secondary,
+                source_point_cloud_version_id=args.source_point_cloud_version,
+                target_point_cloud_version_id=args.target_point_cloud_version,
             )
         except (KeyError, ValueError, FileNotFoundError) as exc:
             print(f"Error: {exc}")
@@ -396,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
                 sqlite_path=args.sqlite,
                 artifact_root=args.artifact_root,
                 rgb_root=args.rgb_root,
+                point_cloud_version_id=args.point_cloud_version,
                 subject_id=args.subject,
                 mapping_version_id=args.mapping_version,
                 annotator_id=args.annotator_id,
