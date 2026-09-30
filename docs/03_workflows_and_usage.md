@@ -590,3 +590,16 @@ syncwb map-nearest --sqlite "<prepared-database>" --subject 19_MM --source-run "
 
 See [the display-provenance contract](raw_point_cloud_package.md#gui-sessions-and-anchor-display-provenance)
 for mixed-version anchor exports, missing frames, and prediction-overlay limits.
+
+
+## 18. Student deployment packages
+
+Use `export-student-package` for a clean portable assignment and
+`verify-student-package` for automated integrity checks. See
+[the student package contract](student_package.md) for CLI options, included assets,
+package/annotator identities, relative paths and operating-system setup.
+Package generation does not replace the master database. WP2 return imports,
+transactional saves, recovery snapshots and GUI safeguards are described in
+[anchor returns and recovery](anchor_returns.md). Student returns require their
+original package manifest; conflicts reject the whole file and identical retries
+do not duplicate anchors.

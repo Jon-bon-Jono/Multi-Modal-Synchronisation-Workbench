@@ -17,6 +17,7 @@ def run_anchoring_gui(
     mapping_version_id: str | None = None,
     point_cloud_version_id: str | None = None,
     annotator_id: str = "",
+    package_provenance: dict | None = None,
     pose_predictions_path: str | Path | None = None,
     pose_prediction_array: str = "pred_globally_aligned",
 ) -> int:
@@ -48,6 +49,7 @@ def run_anchoring_gui(
         mapping_version_id=selection.mapping_version_id,
         point_cloud_version_id=selection.point_cloud_version_id,
         annotator_id=annotator_id,
+        package_provenance=package_provenance,
         pose_predictions_path=pose_predictions_path,
         pose_prediction_array=pose_prediction_array,
     )

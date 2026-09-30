@@ -13,6 +13,7 @@ import numpy as np
 import time
 
 from sync_workbench.experimental.anchoring_gui.anchor_table import AnchorTable
+from sync_workbench.experimental.anchoring_gui.compact_label import compact_label
 from sync_workbench.experimental.anchoring_gui.controllers import AnchoringController
 from sync_workbench.experimental.anchoring_gui.pointcloud_panel import PointCloudPanel
 from sync_workbench.experimental.anchoring_gui.video_panel import VideoPanel
@@ -102,6 +103,11 @@ def make_main_window_class():
             self.controller = controller
             self.source_sample, self.target_sample = self.controller.initial_samples()
             self._target_error = ""
+            self._source_error = ""
+            self._source_ready_sample = None
+            self._target_ready_sample = None
+            self._offset_mapping_error = ""
+            self._both_mapping_error = ""
             self.source_playing = False
             self.target_playing = False
             self.both_playing = False
@@ -132,13 +138,20 @@ def make_main_window_class():
             self.target_fps = self.controller.nominal_fps(self.controller.target_run_id, self.controller.target_device_type)
 
             self.setWindowTitle(f"SyncWB — {self.controller.selection.readable_label} — {self.controller.target_device_type}")
-            self.session_label = QLabel(f"Cloud fixed for this session: {self.controller.selection.source_label} | {self.controller.selection.readable_label}")
-            self.session_label.setWordWrap(True)
-            self.session_label.setToolTip(self.controller.point_cloud_version_id)
-            self.cloud_status = QLabel()
-            self.cloud_status.setWordWrap(True)
+            source_name = "Offline raw" if self.controller.target_device_type == "radar_raw" else "Online cloud"
+            self._session_details = (f"Cloud fixed for this session: {self.controller.selection.source_label} | "
+                f"{self.controller.selection.readable_label} | annotator: {self.controller.annotator_id or 'not specified'}"
+                f" | version: {self.controller.point_cloud_version_id} | package: {self.controller.package_id or 'standalone'}")
+            self.session_label = compact_label(f"{self.controller.subject_id} | {source_name}: {self.controller.selection.readable_label} | {self.controller.annotator_id or 'Annotator not specified'}")
+            self.session_label.setToolTip(self._session_details)
+            self.cloud_status = compact_label()
             self.video_panel = VideoPanel()
             self.point_panel = PointCloudPanel()
+            # The decoded image dimensions must not dictate the layout size.
+            self.video_panel.setMinimumSize(240, 180)
+            self.video_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+            self.point_panel.setMinimumSize(240, 180)
+            self.point_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
             self.point_colour_legend = QLabel("")
             self.point_colour_legend.setMinimumHeight(24)
@@ -148,13 +161,23 @@ def make_main_window_class():
             self.point_colour_legend_ticks.setAlignment(Qt.AlignCenter)
             self.point_colour_legend_ticks.setVisible(False)
 
-            self.anchor_table = AnchorTable()
-            self.status = QLabel("")
             self.point_colour_legend.setMinimumHeight(22)
             self.point_colour_legend.setWordWrap(True)
             self.anchor_table = AnchorTable()
-            self.status = QLabel("")
-            self.status.setWordWrap(True)
+            self.anchor_table.setMinimumHeight(75)
+            self.anchor_table.setMaximumHeight(150)
+            # Keep full diagnostics for Details and automated checks, not the main layout.
+            self.status = QLabel("", self)
+            self.action_status = QLabel("Anchors save immediately to the local database.", self)
+            self.navigation_status = QLabel("Navigation mapping is an initial aid; anchors determine synchronization later.", self)
+            for label in (self.status, self.action_status, self.navigation_status):
+                label.hide()
+            self.summary_status = compact_label()
+            self.notice_status = compact_label()
+            self.notice_status.hide()
+            self._action_summary = ""
+            self._navigation_fallback = ""
+            self._anchor_count = 0
 
             self.source_spin = QSpinBox()
             self.source_spin.setRange(0, max(0, self.source_max))
@@ -236,6 +259,8 @@ def make_main_window_class():
         def _build_layout(self):
             root = QWidget()
             outer = QVBoxLayout(root)
+            outer.setContentsMargins(8, 6, 8, 6)
+            outer.setSpacing(4)
             outer.addWidget(self.session_label)
 
             panels = QHBoxLayout()
@@ -244,6 +269,7 @@ def make_main_window_class():
             point_container = QWidget()
             point_layout = QVBoxLayout(point_container)
             point_layout.setContentsMargins(0, 0, 0, 0)
+            point_layout.setSpacing(2)
             point_layout.addWidget(self.point_panel, stretch=1)
             point_layout.addWidget(self.cloud_status)
             point_layout.addWidget(self.point_colour_legend)
@@ -270,11 +296,20 @@ def make_main_window_class():
             controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             controls_scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
             controls_scroll.setMinimumWidth(0)
-            controls_scroll.setMaximumHeight(260)
-
+            controls_scroll.setMinimumHeight(max(180, self.fontMetrics().height() * 10))
+            controls_scroll.setMaximumHeight(max(220, self.fontMetrics().height() * 12))
+            self.controls_scroll = controls_scroll
             outer.addWidget(controls_scroll)
 
-            outer.addWidget(self.status)
+            status_row = QHBoxLayout()
+            status_row.setContentsMargins(0, 0, 0, 0)
+            status_row.addWidget(self.summary_status, stretch=1)
+            self.details_button = QPushButton("Details…")
+            self.details_button.setToolTip("Session identity, mapping diagnostics and full save/error messages")
+            self.details_button.clicked.connect(self.show_session_details)
+            status_row.addWidget(self.details_button)
+            outer.addLayout(status_row)
+            outer.addWidget(self.notice_status)
             outer.addWidget(self.anchor_table, stretch=1)
             self.setCentralWidget(root)
 
@@ -438,15 +473,13 @@ def make_main_window_class():
             self._stop_playback()
             self.source_sample = self._clamp_source(self.source_spin.value())
             self._set_spin_value(self.source_spin, self.source_sample)
-            self.refresh_source()
-            self.refresh_status()
+            self.refresh_all()
 
         def go_target_from_spin(self) -> None:
             self._stop_playback()
             self.target_sample = self._clamp_target(self.target_spin.value())
             self._set_spin_value(self.target_spin, self.target_sample)
-            self.refresh_target()
-            self.refresh_status()
+            self.refresh_all()
 
         def _step_source_no_stop(self, delta: int) -> None:
             self.source_sample = self._clamp_source(self.source_sample + int(delta))
@@ -481,8 +514,10 @@ def make_main_window_class():
             """
             try:
                 mapped_target = int(self.controller.sync_target_to_source(int(self.source_sample)))
+                self._offset_mapping_error = ""
                 return int(self.target_sample) - mapped_target
-            except Exception:
+            except Exception as exc:
+                self._offset_mapping_error = str(exc)
                 return 0
 
 
@@ -495,10 +530,13 @@ def make_main_window_class():
         ) -> int:
             """Map source_sample to target, preserving the current manual target offset."""
             try:
+                if self._offset_mapping_error:
+                    raise ValueError(self._offset_mapping_error)
                 mapped_target = int(self.controller.sync_target_to_source(int(source_sample)))
+                self._set_navigation_status("Both-stream step: navigation mapping with manual offset.")
                 return self._clamp_target(mapped_target + int(target_offset))
-            except Exception:
-                # If the mapping lookup fails, fall back to the old behaviour.
+            except Exception as exc:
+                self._set_navigation_status(f"Mapping unavailable; both-stream step uses frame/rate fallback: {exc}")
                 return self._clamp_target(int(self.target_sample) + int(fallback_target_delta))
         
         def step_both(self, delta: int) -> None:
@@ -578,9 +616,13 @@ def make_main_window_class():
             time target playback so the GUI remains usable.
             """
             try:
+                if self._both_mapping_error:
+                    raise ValueError(self._both_mapping_error)
                 mapped_target = int(self.controller.sync_target_to_source(int(source_sample)))
+                self._set_navigation_status("Both-stream playback: navigation mapping with manual offset.")
                 return self._clamp_target(mapped_target + int(self._both_target_offset_from_mapping))
-            except Exception:
+            except Exception as exc:
+                self._set_navigation_status(f"Nominal-rate playback fallback — mapping unavailable: {exc}")
                 return self._clamp_target(self._both_base_target_sample + round(float(elapsed) * float(self.target_fps)))
 
         def _advance_both_playback(self) -> None:
@@ -640,8 +682,12 @@ def make_main_window_class():
                     try:
                         mapped_target = int(self.controller.sync_target_to_source(self._both_base_source_sample))
                         self._both_target_offset_from_mapping = int(self._both_base_target_sample - mapped_target)
-                    except Exception:
+                        self._both_mapping_error = ""
+                        self._set_navigation_status("Both-stream playback: navigation mapping with manual offset.")
+                    except Exception as exc:
                         self._both_target_offset_from_mapping = 0
+                        self._both_mapping_error = str(exc)
+                        self._set_navigation_status(f"Nominal-rate playback fallback — mapping unavailable: {exc}")
                     self._both_play_start_monotonic = time.monotonic()
                     self.both_timer.start()
             self._update_play_button_labels()
@@ -673,6 +719,8 @@ def make_main_window_class():
             self.go_source_from_spin()
             self.go_target_from_spin()
             try:
+                if not self.place_anchor_button.isEnabled():
+                    raise ValueError("Cannot anchor: required RGB/cloud display is unavailable. " + self._source_error + " " + self._target_error)
                 self.controller.place_anchor(
                     self.source_sample,
                     self.target_sample,
@@ -681,6 +729,7 @@ def make_main_window_class():
                     point_window_radius=self.pc_window_radius,
                     filter_noise=self.filter_noise_points,
                 )
+                self._show_write_result()
                 self.refresh_anchors()
             except Exception as exc:
                 self._show_error("place anchor failed", exc)
@@ -691,6 +740,7 @@ def make_main_window_class():
                 return
             try:
                 self.controller.delete_anchor(anchor_id)
+                self._show_write_result()
                 self.refresh_anchors()
             except Exception as exc:
                 self._show_error("delete anchor failed", exc)
@@ -842,11 +892,12 @@ def make_main_window_class():
                 self.refresh_source()
 
         def export_anchors(self) -> None:
-            path, _ = QFileDialog.getSaveFileName(self, "Export anchors", "anchors.json", "JSON files (*.json);;All files (*)")
-            if not path:
-                return
             try:
+                path, _ = QFileDialog.getSaveFileName(self, "Export anchors", str(self.controller.default_export_path()), "JSON files (*.json);;All files (*)")
+                if not path:
+                    return
                 self.controller.export_anchors(Path(path))
+                self._show_write_result()
             except Exception as exc:
                 self._show_error("export anchors failed", exc)
 
@@ -901,9 +952,16 @@ def make_main_window_class():
 
             return self._projected_pc_cache_value
 
+        def _update_anchor_enabled(self):
+            ready = (self._source_ready_sample == self.source_sample and self._target_ready_sample == self.target_sample
+                     and not self._source_error and not self._target_error)
+            self.place_anchor_button.setEnabled(ready)
+
         def refresh_source(self) -> None:
+            self._source_error = ""
+            self._source_ready_sample = None
             try:
-                frame = self.controller.get_rgb_frame(self.source_sample) if self.show_video_frames else None
+                frame = self.controller.get_rgb_frame(self.source_sample)
                 pose2d = self.controller.get_source_pose2d(self.source_sample) if self.show_pose2d_overlay else None
                 try:
                     projected_points = self._current_projected_points() if self.show_projected_pc_overlay else None
@@ -917,12 +975,17 @@ def make_main_window_class():
                     projected_pc_color_mode=self.point_color_mode,
                 )
                 self.video_panel.set_scene(frame_rgb=frame, pose2d=pose2d, projected_points=projected_points)
+                self._source_ready_sample = self.source_sample
             except Exception as exc:
-                self.video_panel.setText(f"RGB/overlay unavailable: {exc}")
-                print(f"RGB/overlay unavailable: {exc}")
+                self._source_error = f"RGB/overlay unavailable: {exc}"
+                self.video_panel.clear()
+                self.video_panel.setText(self._source_error)
+            self._update_anchor_enabled()
+            self.refresh_status()
 
         def refresh_target(self) -> None:
             self._target_error = ""
+            self._target_ready_sample = None
             try:
                 pose3d = (
                     self.controller.get_source_pose3d(self.source_sample)
@@ -950,7 +1013,7 @@ def make_main_window_class():
                 shown = len(filter_noise_points(points)) if self.filter_noise_points else len(points)
                 coverage = "empty processed frame" if len(points) == 0 else f"{len(points):,} points; {shown:,} displayed"
                 self.cloud_status.setText(f"{coverage} | window ±{self.pc_window_radius} frames")
-                self.place_anchor_button.setEnabled(True)
+                self._target_ready_sample = self.target_sample
             except Exception as exc:
                 # Never leave the previous frame visible when the new cloud/window is missing.
                 self.point_panel.set_scene(np.empty((0, 6), dtype=np.float32))
@@ -962,7 +1025,8 @@ def make_main_window_class():
                 reason = "Frame was not processed in this cloud version" if summary.get("point_status") == "unprocessed" else str(exc)
                 self._target_error = f"Cloud unavailable: {reason}"
                 self.cloud_status.setText(self._target_error)
-                self.place_anchor_button.setEnabled(False)
+            self._update_anchor_enabled()
+            self.refresh_status()
 
         def refresh_status(self) -> None:
             mapping_text = "mapping unavailable"
@@ -1000,13 +1064,76 @@ def make_main_window_class():
             self.status.setText(
                 f"source {self.controller.source_device_type}/{self.controller.source_run_id} sample={self.source_sample} "
                 f"of {self.source_max}; target {self.controller.target_device_type}/{self.controller.target_run_id} "
-                f"sample={self.target_sample} of {self.target_max}; {mapping_text}{prediction_text}; {self._target_error}"
+                f"sample={self.target_sample} of {self.target_max}; {mapping_text}{prediction_text}"
+                + (f"; {self._source_error}" if self._source_error else "")
+                + (f"; {self._target_error}" if self._target_error else "")
             )
+            self._update_compact_status()
 
         def refresh_anchors(self) -> None:
-            self.anchor_table.set_anchors(self.controller.list_anchors())
+            anchors = self.controller.list_anchors()
+            self.anchor_table.set_anchors(anchors)
+            self._anchor_count = len(anchors)
+            self._update_compact_status()
+
+        def _set_navigation_status(self, text):
+            self.navigation_status.setText(text)
+            self._navigation_fallback = text if "fallback" in text.lower() else ""
+            self._update_compact_status()
+
+        def _update_compact_status(self):
+            summary = (f"RGB {self.source_sample:,} / {self.source_max:,} | "
+                       f"Radar {self.target_sample:,} / {self.target_max:,} | {self._anchor_count} anchors")
+            if self._navigation_fallback:
+                summary = "FALLBACK | " + summary
+            self.summary_status.setText(summary)
+            self.summary_status.setToolTip(self.status.text() + "\n" + self.navigation_status.text())
+            notices = [self._source_error, self._target_error, self._navigation_fallback, self._action_summary]
+            text = " | ".join(value for value in notices if value)
+            self.notice_status.setText(text)
+            self.notice_status.setVisible(bool(text))
+            self.notice_status.setToolTip("\n".join(value for value in
+                (self._source_error, self._target_error, self.navigation_status.text(), self.action_status.text()) if value))
+
+        def show_session_details(self):
+            from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit
+            dialog = QDialog(self)
+            dialog.setWindowTitle("SyncWB session details")
+            layout = QVBoxLayout(dialog)
+            text = QPlainTextEdit()
+            text.setReadOnly(True)
+            text.setPlainText("\n\n".join((self._session_details, self.navigation_status.text(),
+                                          self.action_status.text(), self.status.text(), self.cloud_status.text())))
+            layout.addWidget(text)
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            available = self.screen().availableGeometry()
+            dialog.resize(min(720, available.width() - 60), min(420, available.height() - 60))
+            dialog.exec()
+
+        def _show_write_result(self):
+            result = self.controller.last_write_result
+            text = result.get("message", "")
+            if result.get("warning"):
+                text += " | WARNING: " + result["warning"]
+            elif result.get("recovery_path"):
+                text += " | Recoverable copy: " + result["recovery_path"]
+            self.action_status.setText(text)
+            if result.get("warning"):
+                self._action_summary = "Saved in database; recovery copy failed. Retry Export anchors."
+            elif text.startswith("Saved anchor"):
+                self._action_summary = "Anchor saved | Recovery copy saved"
+            elif text.startswith("Deleted anchor"):
+                self._action_summary = "Anchor deleted | Recovery copy saved"
+            else:
+                self._action_summary = result.get("message", "").split(" to ", 1)[0]
+            self._update_compact_status()
 
         def _show_error(self, title: str, exc: Exception) -> None:
+            self.action_status.setText(f"{title}: {exc}")
+            self._action_summary = self.action_status.text()
+            self._update_compact_status()
             QMessageBox.warning(self, title, str(exc))
 
         def closeEvent(self, event):  # noqa: N802 - Qt API name

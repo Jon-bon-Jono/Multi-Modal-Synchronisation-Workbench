@@ -9,6 +9,7 @@ versions/
 artifact_store/
 runs/
 exported_sequences/
+deployment_data/
 
 # Database
 *.sqlite

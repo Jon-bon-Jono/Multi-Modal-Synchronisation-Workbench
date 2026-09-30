@@ -28,6 +28,7 @@ def sessions(backend, tmp_path):
     store = SQLiteCoreStore(db)
     store.write_table('DEVICE_RUN', pd.DataFrame([dict(subject_id='P',run_id='RGB',device_type='kinect_rgb',nominal_fps=1)]), if_exists='append')
     store.write_table('RUN_SAMPLE', pd.DataFrame([dict(subject_id='P',run_id='RGB',device_type='kinect_rgb',sample_index=i,sample_kind='frame') for i in range(3)]), if_exists='append')
+    store.write_table('RUN_SAMPLE', pd.DataFrame([dict(subject_id='P',run_id='R',device_type='radar_pc',sample_index=i,sample_kind='frame') for i in range(3)]), if_exists='append')
     store.write_table('MAPPING_VERSION', pd.DataFrame([dict(subject_id='P',mapping_version_id=mid,source_run_id='RGB',source_device_type='kinect_rgb',target_run_id='R',target_device_type=dev) for mid,dev in [('raw_map','radar_raw'),('online_map','radar_pc')]]))
     store.write_table('SAMPLE_MAPPING', pd.DataFrame([dict(subject_id='P',mapping_version_id=mid,source_run_id='RGB',source_device_type='kinect_rgb',source_sample_index=i,target_run_id='R',target_device_type=dev,target_sample_index=i,rank=1,is_primary=True) for mid,dev in [('raw_map','radar_raw'),('online_map','radar_pc')] for i in range(3)]))
     points = np.array([[1,2,3,4,5,6]],dtype=np.float32)
@@ -40,8 +41,10 @@ def sessions(backend, tmp_path):
 
 def controller(sessions, version, mapping='raw_map', **kwargs):
     db, root, _ = sessions
-    return AnchoringController(sqlite_path=db,artifact_root=root,rgb_root=root,subject_id='P',mapping_version_id=mapping,
+    result = AnchoringController(sqlite_path=db,artifact_root=root,rgb_root=root,subject_id='P',mapping_version_id=mapping,
                                point_cloud_version_id=version,annotator_id='tester',**kwargs)
+    result.get_rgb_frame = lambda sample: np.zeros((72,128,3),np.uint8)
+    return result
 
 
 def test_session_choices_and_strict_acquisition_binding(sessions):
@@ -80,7 +83,11 @@ def test_controller_reads_selected_version_and_preserves_anchor_provenance(sessi
     assert original['session_id'] != export['session']['session_id']
     # The existing JSON importer preserves notes/provenance without adding versions to endpoint keys.
     copy=tmp_path/'import.sqlite'
-    SQLiteCoreStore(copy).initialise_empty()
+    import shutil
+    shutil.copyfile(db,copy)
+    with sqlite3.connect(copy) as conn:
+        conn.execute('DELETE FROM ANCHOR_MEMBER')
+        conn.execute('DELETE FROM ANCHOR')
     AnchorService(copy).import_anchors_json(tmp_path/'anchors.json')
     imported=SQLiteCoreStore(copy).read_table('ANCHOR')
     assert set(imported.notes)=={row['notes'] for row in export['ANCHOR']}

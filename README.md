@@ -401,3 +401,15 @@ This means source samples are mapped only when their predicted target time falls
 ```bash
 python -m pytest
 ```
+
+## Portable student anchoring packages
+
+`export-student-package` creates a clean one-subject, one-session-pair assignment
+with its selected cloud, source poses, RGB video and navigation metadata. The
+folder includes relative-path configuration, checksums, application source and
+Windows/macOS Conda setup/launch scripts with visible progress. Student work stays in its own local database.
+See [package generation and installation](docs/student_package.md) and
+[anchor returns and recovery](docs/anchor_returns.md). WP1 and WP2 are implemented:
+portable assignments, transactional saves/imports, retained recovery snapshots,
+duplicate/conflict handling, and visible frame-load/playback safeguards.
+Official separate-computer dynamic testing and the final student guide remain WP3–WP4.

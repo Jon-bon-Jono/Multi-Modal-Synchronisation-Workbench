@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 from sync_workbench.services.raw_point_cloud_import_service import RawPointCloudImportService
@@ -36,6 +37,19 @@ def build_parser() -> argparse.ArgumentParser:
     versions.add_argument("--subject", required=True)
     versions.add_argument("--run", required=True)
     versions.add_argument("--device", choices=["radar_pc", "radar_raw"], required=True)
+
+    student = sub.add_parser("export-student-package", help="Create a clean portable student anchoring assignment")
+    student.add_argument("--sqlite", required=True)
+    student.add_argument("--artifact-root", required=True)
+    student.add_argument("--rgb-root", required=True)
+    student.add_argument("--output", required=True)
+    student.add_argument("--subject", required=True)
+    student.add_argument("--mapping-version", required=True)
+    student.add_argument("--point-cloud-version", required=True)
+    student.add_argument("--application-root", default=None)
+    student.add_argument("--read-only-root", action="append", default=[])
+    verify_student = sub.add_parser("verify-student-package", help="Verify immutable package files without opening the GUI")
+    verify_student.add_argument("--package", required=True)
 
     ingest = sub.add_parser("ingest-temp", help="Convert temporary zst ingestion files into a canonical SQLite store")
     ingest.add_argument("--input", required=True, help="Folder containing device_runs.zst and available sample .zst files")
@@ -183,7 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
     import_anchors = sub.add_parser("import-anchors", help="Import anchors from JSON")
     import_anchors.add_argument("--sqlite", required=True)
     import_anchors.add_argument("--input", required=True)
-    import_anchors.add_argument("--overwrite", action="store_true")
+    import_anchors.add_argument("--overwrite", action="store_true", help="Unsupported: conflicts must be resolved explicitly")
+    import_anchors.add_argument("--package-manifest", default=None, help="Original manifest.json required for student returns")
+    import_anchors.add_argument("--dry-run", action="store_true", help="Validate identities, samples and conflicts without inserting anchors")
 
     synthetic = sub.add_parser("piecewise-synthetic-report", help="Generate experimental synthetic piecewise-affine feasibility reports")
     synthetic.add_argument("--output", required=True)
@@ -219,6 +235,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    if args.command == "export-student-package":
+        from sync_workbench.deployment.student_package import export_student_package
+        result = export_student_package(sqlite_path=args.sqlite, artifact_root=args.artifact_root, rgb_root=args.rgb_root,
+            output=args.output, subject_id=args.subject, mapping_version_id=args.mapping_version,
+            point_cloud_version_id=args.point_cloud_version, application_root=args.application_root,
+            read_only_roots=args.read_only_root)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.command == "verify-student-package":
+        from sync_workbench.deployment.package_layout import verify_package
+        print(json.dumps(verify_package(args.package), indent=2))
+        return 0
     if args.command == "migrate-point-clouds":
         print(json.dumps(migrate_database_copy(args.source_sqlite, args.output_sqlite), indent=2))
         return 0
@@ -433,7 +461,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "import-anchors":
-        counts = AnchorService(args.sqlite).import_anchors_json(args.input, overwrite=args.overwrite)
+        try:
+            counts = AnchorService(args.sqlite).import_anchors_json(args.input, overwrite=args.overwrite, expected_manifest=args.package_manifest, dry_run=args.dry_run)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            print(json.dumps({"status":"rejected", "error":str(exc)}, indent=2))
+            return 2
         print(json.dumps(counts, indent=2, sort_keys=True))
         return 0
 

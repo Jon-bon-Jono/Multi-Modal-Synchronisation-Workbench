@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import json
 from types import MappingProxyType
 import uuid
 from typing import Any
@@ -35,6 +36,7 @@ class AnchoringController:
         subject_id: str,
         mapping_version_id: str,
         annotator_id: str = "",
+        package_provenance: dict | None = None,
         point_cloud_version_id: str | None = None,
         pose_predictions_path: str | Path | None = None,
         pose_prediction_array: str = "pred_globally_aligned",
@@ -43,6 +45,10 @@ class AnchoringController:
         self.subject_id = subject_id
         self.mapping_version_id = mapping_version_id
         self.annotator_id = annotator_id
+        self._asset_roots = (Path(artifact_root).resolve(),Path(rgb_root).resolve())
+        self.last_write_result = {}
+        self.recovery_root = self.sqlite_path.parent / ("recovery" if package_provenance else self.sqlite_path.stem + "_recovery")
+        self._package_provenance = json.loads(json.dumps(package_provenance)) if package_provenance else None
         self.store = SQLiteCoreStore(sqlite_path)
         self.lookup = MappingLookupService(sqlite_path)
         self._selection = resolve_session(sqlite_path, artifact_root, subject_id, mapping_version_id, point_cloud_version_id)
@@ -72,13 +78,18 @@ class AnchoringController:
         return self._selection
 
     @property
+    def package_id(self):
+        return self._package_provenance.get("package_id", "") if self._package_provenance else ""
+
+    @property
     def point_cloud_version_id(self):
         return self._selection.point_cloud_version_id
 
     def session_metadata(self):
         return {"created_by": "experimental_anchoring_gui", "initial_mapping_version_id": self.mapping_version_id,
                 "annotator_id": self.annotator_id, "session_id": self.session_id, "session_started_at": self.session_started_at,
-                "point_cloud": self.selection.cloud_provenance()}
+                "point_cloud": self.selection.cloud_provenance(),
+                **({"package": json.loads(json.dumps(self._package_provenance))} if self._package_provenance else {})}
 
     def initial_samples(self):
         with closing(sqlite3.connect(self.sqlite_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
@@ -230,12 +241,14 @@ class AnchoringController:
     def place_anchor(self, source_sample_index: int, target_sample_index: int, *, label: str = "", confidence: float | None = None, notes: str = "", point_window_radius: int = 0, filter_noise: bool = False) -> str:
         # Do not claim an annotator saw a cloud when the selected frame/window is unavailable.
         self.get_target_points_window(target_sample_index, radius=point_window_radius)
+        # RGB is required even when the user has hidden its rendering layer.
+        self.get_rgb_frame(source_sample_index)
         summary = self.get_target_summary(target_sample_index)
         provenance = self.session_metadata()
         provenance["display"] = {"target_sample_index": int(target_sample_index), "point_window_radius": max(0, int(point_window_radius)),
                                  "excluded_association_ids": [253, 254, 255] if filter_noise else [],
                                  "point_status": summary.get("point_status", "available")}
-        return self.anchors.create_pair_anchor(
+        anchor_id = self.anchors.create_pair_anchor(
             subject_id=self.subject_id,
             source=AnchorEndpoint(self.source_run_id, self.source_device_type, int(source_sample_index), "source", confidence),
             target=AnchorEndpoint(self.target_run_id, self.target_device_type, int(target_sample_index), "target", confidence),
@@ -244,11 +257,49 @@ class AnchoringController:
             user_notes=notes,
             provenance=provenance,
         )
+        self._record_saved("Saved anchor " + anchor_id)
+        return anchor_id
 
     def delete_anchor(self, anchor_id: str) -> None:
+        # Preserve the deleted anchor before committing the deletion.
+        self._recovery_snapshot()
         self.anchors.delete_anchor(self.subject_id, anchor_id)
+        self._record_saved("Deleted anchor " + anchor_id)
+
+    def _record_saved(self, message):
+        self.last_write_result = {"message":message,"database_saved":True,"recovery_path":None,"warning":""}
+        try:
+            self.last_write_result["recovery_path"] = str(self._recovery_snapshot())
+        except Exception as exc:
+            self.last_write_result["warning"] = f"Saved in database, but recovery copy failed: {exc}. Retry Export anchors."
+
+    def _recovery_snapshot(self):
+        path = self.recovery_root / ("anchors_" + utc_now_str().replace(":", "").replace(".", "") + "_" + uuid.uuid4().hex[:8] + ".json")
+        self._export_anchors(path)
+        return path
+
+    def default_export_path(self):
+        name = f"{self.package_id or self.subject_id}_{self.annotator_id or 'anchors'}.json"
+        path = self.sqlite_path.parent / "exports" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
     def export_anchors(self, path: str | Path) -> dict[str, Any]:
+        path = Path(path).resolve()
+        protected = (*self._asset_roots, self.recovery_root.resolve())
+        if any(path == p or path.is_relative_to(p) for p in protected):
+            raise ValueError("Choose an export location outside source assets and recovery snapshots")
+        if self.package_id:
+            package_root = self.sqlite_path.parent.parent.resolve()
+            export_root = (self.sqlite_path.parent / "exports").resolve()
+            if path.is_relative_to(package_root) and not path.is_relative_to(export_root):
+                raise ValueError("Within a student package, save return files under work/exports")
+        payload = self._export_anchors(path)
+        self.last_write_result = {"message":f"Exported {len(payload['ANCHOR'])} anchors to {path}",
+                                  "database_saved":True,"recovery_path":str(path),"warning":""}
+        return payload
+
+    def _export_anchors(self, path):
         return self.anchors.export_pair_anchors_json(
             path,
             subject_id=self.subject_id,
