@@ -1,8 +1,9 @@
 flowchart LR
-    subgraph Experimental_Frontend
+    subgraph Clients
         GUI[Experimental Qt anchoring GUI]
         CLI[CLI]
         NB[Notebook]
+        SELECT[GUI session-selection adapter]
     end
 
     subgraph Services
@@ -13,6 +14,8 @@ flowchart LR
         PIECEWISE[PiecewiseSyncService]
         VIDEO[VideoFrameService]
         ASSET[AssetService]
+        RAW[RawPointCloudImportService]
+        AUDIT[ArtifactAuditService]
     end
 
     subgraph Official_Backend
@@ -20,6 +23,8 @@ flowchart LR
         TABLES[Core table specs]
         STORAGE[SQLiteCoreStore]
         ARTIFACTS[ArtifactStore]
+        VALIDATE[RawCloudPackage validation]
+        DEPLOY[Portable student deployment / anchor returns]
     end
 
     GUI --> PAYLOAD
@@ -29,10 +34,25 @@ flowchart LR
     CLI --> PIECEWISE
     CLI --> ANCHOR
     CLI --> PAYLOAD
+    CLI --> RAW
+    CLI --> AUDIT
+    CLI --> DEPLOY
+    CLI --> PAIR
+    GUI --> SELECT
+    SELECT --> SQLITE
     NB --> Services
 
     VIDEO --> ASSET
     PAYLOAD --> ARTIFACTS
+    PAYLOAD --> STORAGE
+    PAIR --> PAYLOAD
+    RAW --> VALIDATE
+    RAW --> SQLITE
+    RAW --> BUNDLES
+    AUDIT --> SQLITE
+    AUDIT --> ARTIFACTS
+    DEPLOY --> SQLITE
+    DEPLOY --> BUNDLES
     PIECEWISE --> ALG
     PIECEWISE --> STORAGE
     ANCHOR --> STORAGE
@@ -43,3 +63,4 @@ flowchart LR
     STORAGE --> SQLITE[(SQLite)]
     ARTIFACTS --> BUNDLES[NPZ / JSONL artifacts]
     ASSET --> ROOTS[Local roots]
+    %% Session selection reads canonical metadata; payloads remain service-managed.

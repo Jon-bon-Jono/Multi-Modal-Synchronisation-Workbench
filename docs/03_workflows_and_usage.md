@@ -84,6 +84,10 @@ Do not try to encode device-run structure here. That belongs in `DEVICE_RUN`.
 
 Create one `DEVICE_RUN` row for each uninterrupted acquisition segment.
 
+Reprocessing a raw acquisition adds a `POINT_CLOUD_VERSION` under its existing
+`radar_raw` run. Reuse captured samples and timelines; see
+[versioned offline raw point clouds](#17-versioned-offline-raw-point-clouds).
+
 Examples:
 
 - Kinect RGB recording,
@@ -413,7 +417,7 @@ syncwb inspect-pair \
   --source-sample 123
 ```
 
-This reports the selected source and target samples, timing residual/support metadata, scalar summaries, available payload roles, and payload shapes. This command is mainly a backend smoke test for the future GUI service boundary.
+This reports the selected source and target samples, timing residual/support metadata, scalar summaries, available payload roles, and payload shapes through the backend service layer. For versioned raw payloads, pass the appropriate `--source-point-cloud-version` or `--target-point-cloud-version` explicitly.
 
 ## 13. Workflow J — Inspect diagnostics
 

@@ -153,6 +153,16 @@ for an existing version. File publication uses staged files and
 per-file atomic replacement, not a multi-file transaction; the checksum detects
 a mismatched pair after an interrupted publication.
 
+### Comparing settings across recordings
+
+For cross-recording settings comparisons, use the retained `processing_cfg` and
+`generator_metadata`, stored after import under `POINT_CLOUD_VERSION.provenance_json.version`.
+Compare the config, executable/version, calibration sources and tracking setup;
+the config hash alone is insufficient. Result IDs and readable labels do not
+establish settings equivalence. SyncWB does not currently assign a shared
+`processing_recipe_id` or automatically classify equivalent settings across runs.
+See [the data-model comparison fields](02_data_model_and_tables.md#121-comparing-processing-settings-across-recordings).
+
 ## Anchor and mapping compatibility
 
 Anchor endpoints remain captured-sample identities. Record the displayed

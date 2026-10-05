@@ -1,8 +1,12 @@
-# v0.2.2 architecture overview
+# SyncWB architecture overview
+
+This describes the current backend, versioned cloud import, experimental GUI,
+and portable student deployment. The [ER diagram](er_diagram.mmd) shows all
+canonical tables and logical keys from `core/tables.py`.
 
 ```mermaid
 flowchart LR
-    CLI[CLI / future GUI] --> Services[Application services]
+    CLI[CLI / experimental Qt GUI / notebooks] --> Services[Application services]
     Services --> Core[Core schemas, enums, IDs, validation]
     Services --> Storage[CoreStore interface]
     Services --> Assets[Asset resolver]
@@ -13,15 +17,17 @@ flowchart LR
     Assets --> Roots[User-local roots config]
 ```
 
-The backend has no GUI dependency. A future Qt GUI should call the service layer
-rather than directly reading pandas dataframes or SQLite tables.
+The backend has no required GUI dependency. The experimental Qt GUI uses services
+for payload access, anchors, video and mapping navigation. Its session-selection
+adapter also reads canonical registry/mapping metadata to find compatible choices.
 
 ## Main services
 
 - `IngestionService`: reads the temporary package and writes the canonical store.
+- `RawPointCloudImportService`: validates versioned offline raw packages, reuses acquisition samples/timelines, and registers immutable cloud bundles.
 - `MappingService`: generates initial nearest-time mappings using selected source and target timelines.
 - `ArtifactBuildService`: builds run-level payload bundles and writes artifact metadata.
-- `PayloadService`: retrieves sample payloads by canonical sample identity.
+- `PayloadService`: lists cloud versions and retrieves sample payloads/summaries by canonical sample identity and selected cloud version.
 - `PairInspectionService`: retrieves mapped-pair metadata, summaries, payload roles, and payload shapes.
 - `ArtifactAuditService`: checks artifact file/metadata consistency.
 - `AnchorService`: creates, lists, deletes, exports, and imports canonical anchors.
@@ -29,6 +35,38 @@ rather than directly reading pandas dataframes or SQLite tables.
 - `VideoFrameService`: retrieves RGB MP4 frames by canonical sample index.
 - `MappingLookupService`: supports source-target navigation for GUI sync controls.
 - `PiecewiseSyncService`: fits official piecewise-affine sync models and generates revised mapping versions.
+
+## Acquisition and payload versions
+
+One `DEVICE_RUN` represents one uninterrupted acquisition. Its `RUN_SAMPLE` rows,
+timeline estimates, anchor endpoints and mapping rows are shared across offline
+processing results. `POINT_CLOUD_VERSION` registers those results; `RUN_ASSET`,
+`SAMPLE_ARTIFACT` and `SAMPLE_SUMMARY` carry `point_cloud_version_id`.
+Sample artifacts and summaries include the version in their logical keys.
+`SAMPLE_SUMMARY.point_status` distinguishes an available empty cloud from a frame
+that was not processed.
+
+`migrate-point-clouds` copies and migrates an existing database.
+`import-raw-point-clouds` imports the checked pickle/manifest pair and writes
+immutable NPZ bundles. Legacy ingestion/build commands reject this package.
+Offline payload access requires an explicit version once non-legacy raw versions
+are registered. See [the import contract](../raw_point_cloud_package.md).
+
+Version IDs identify completed results bound to their acquisitions. Cross-session
+settings comparison uses the configuration and generator/calibration provenance;
+there is no implemented shared processing-recipe identifier.
+
+## GUI sessions and portable assignments
+
+The launch selector fixes one cloud source/version and compatible mapping for
+the session. Anchor/export provenance records the displayed cloud and display
+settings; anchor endpoints continue to identify captured samples.
+
+The deployment package builder exports one subject/pair/cloud with its initial
+navigation mapping, assets, application source and setup scripts. Students work
+in a local database. Anchor writes/imports are transactional, recovery JSON
+snapshots are retained, and return imports handle duplicates/conflicts.
+See [student packages](../student_package.md) and [anchor returns](../anchor_returns.md).
 
 ## Mapping provenance
 
@@ -46,7 +84,7 @@ from an explicit sync model.
 ## Initial Nearest Mapping
 
 The v0.1 nearest mapping is an anchor-placement aid. It is intended to give the
-future GUI or notebook workflow a default target frame to jump to when browsing
+experimental GUI or notebook workflow a default target frame to jump to when browsing
 from RGB to radar.
 
 For this mapping method, `is_primary=True` means “selected default navigation candidate under the configured primary policy”, not “trusted final synchronised correspondence”.

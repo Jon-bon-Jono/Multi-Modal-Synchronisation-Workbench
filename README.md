@@ -18,6 +18,7 @@ v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and arti
   - `RUN_ASSET`
   - `SAMPLE_ARTIFACT`
   - `SAMPLE_SUMMARY`
+  - `POINT_CLOUD_VERSION`
   - `RUN_TIMELINE_MODEL`
   - `SAMPLE_TIME_ESTIMATE`
   - plus empty anchor/sync/mapping tables as needed
@@ -41,6 +42,15 @@ v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and arti
 - Generates lightweight synthetic feasibility reports for piecewise-affine behaviour.
 - Provides simple run-level RGB video frame access through `RUN_ASSET(asset_role="rgb_video")`.
 - Provides a minimal experimental anchoring GUI under `sync_workbench.experimental`.
+- Imports versioned offline raw clouds with immutable bundles and processing provenance while reusing acquisition samples and timelines.
+- Exports portable student assignments and imports anchor returns with recovery and conflict handling.
+
+See the [architecture overview](docs/architecture/architecture_overview.md),
+[ER diagram](docs/architecture/er_diagram.mmd), and
+[data model](docs/02_data_model_and_tables.md) for the implemented relationships.
+One radar acquisition can have multiple `POINT_CLOUD_VERSION` records under the
+same `DEVICE_RUN`; version IDs identify results, while retained processing
+provenance supports comparison of settings across recordings.
 
 ## Install for development
 

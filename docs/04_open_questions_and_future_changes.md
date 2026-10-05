@@ -292,10 +292,10 @@ The long-term concept is a timeline-based workbench, but the first usable tool d
 4. fit or select a sync model,
 5. preview resulting mappings.
 
-Still open:
-- whether to start with a GUI immediately,
-- whether a CLI plus plots is enough for the first pass,
-- how much annotation support research assistants need on day one.
+The experimental Qt GUI now provides frame browsing, overlays, initial-mapping
+navigation and pair-anchor placement. Fitting revised mappings is available
+through the backend/CLI. The remaining question is how to evolve this into the
+full timeline workbench after student deployment testing.
 
 ---
 
@@ -308,7 +308,9 @@ Possible aids include:
 - side-by-side previews,
 - keyboard shortcuts for fast anchoring.
 
-**Current leaning:** provide rough prealignment first, then manual refinement.
+**Implemented:** initial nearest-time mappings provide rough prealignment;
+the GUI provides side-by-side previews, linked navigation, frame/time jumps and
+manual anchor placement. Further assistance can be evaluated using this workflow.
 
 ---
 
@@ -320,7 +322,10 @@ The project may be shared with research assistants. That raises questions about:
 - conflict handling when two people anchor the same run pair,
 - whether annotator identity should be recorded.
 
-**Current leaning:** support separate local asset resolution early; defer full collaborative editing until it is actually needed.
+**Implemented:** portable assignments use local working databases and asset
+roots, record annotator identity, and return anchors through transactional imports
+with duplicate/conflict handling. Live shared-database collaborative editing
+remains outside this workflow.
 
 ---
 
@@ -336,7 +341,10 @@ Possible bundle contents:
 - anchor exports,
 - mapping exports.
 
-**Current leaning:** define a small portable package once the first end-to-end pipeline works.
+**Implemented for annotation:** student packages include the selected canonical
+subset, assets, assignment metadata, checksums, application source and setup
+scripts. A general publication/reproducibility bundle remains a separate design
+question; see [student packages](student_package.md).
 
 ---
 
@@ -380,16 +388,16 @@ These are plausible future extensions, not current requirements.
 
 ---
 
-## 8. Immediate next decisions worth making
+## 8. Earlier decisions now implemented
 
-The most useful near-term decisions after v0.1 are:
+The following earlier next steps have been implemented or explicitly deferred:
 
 1. v0.2.1 settled the first artifact/payload storage format: run-level ragged NPZ bundles for arrays and indexed JSONL for activity dictionaries,
 2. v0.2.1 added extra `SAMPLE_ARTIFACT` fields including `artifact_id`, `artifact_member_key`, `artifact_format`, `payload_shape`, `payload_dtype`, `payload_bytes`, and `created_at`,
 3. v0.2.1 added a compact `SAMPLE_SUMMARY` table for scalar preview/filter fields,
-4. define the first manual-anchor import/export format,
-5. decide whether to add an `ANCHOR_SESSION` table before implementing the sandbox anchoring GUI,
-6. implement and test the piecewise affine feasibility sandbox before promoting it to a core workflow.
+4. canonical pair-anchor JSON import/export is implemented, including transactional returns, recovery and conflict handling,
+5. `ANCHOR_SESSION` remains deferred; the experimental GUI records session/display provenance in anchor notes and exports,
+6. the piecewise-affine backend algorithm and experimental synthetic feasibility reports are implemented.
 
 ## 9. v0.2.2 decisions now made
 
@@ -414,3 +422,22 @@ The following should be revisited after using the experimental GUI on real subje
 - whether target-to-source inverse lookup should become model-based rather than mapping-table based,
 - whether video frame access needs caching, thumbnails, or predecoded preview artifacts,
 - how much of the synthetic feasibility report format should be promoted into an official diagnostic workflow.
+
+## 11. Versioned clouds and portable deployment: current boundary
+
+Cloud result versioning is implemented through `POINT_CLOUD_VERSION`, versioned
+artifact/summary keys, and immutable offline bundles. A processing change does
+not create a new `DEVICE_RUN`. Acquisition samples, timeline estimates, anchor
+endpoints and mapping keys stay independent of cloud version.
+
+Cross-session recipe grouping remains unimplemented. The retained processing
+configuration and generator/calibration provenance support comparison, but
+there is no shared `processing_recipe_id` or automatic semantic-equivalence
+classifier. See [comparison fields](02_data_model_and_tables.md#121-comparing-processing-settings-across-recordings).
+
+Portable student assignments, remembered annotator identity, transactional
+anchor saves/imports, recovery snapshots, duplicate/conflict handling and frame
+load safeguards are implemented. Earlier questions about sharing subsets and
+returning anchors therefore concern extensions to this workflow. Separate-machine
+dynamic testing and the final student guide remain WP3/WP4; see
+[student packages](student_package.md) and [anchor returns](anchor_returns.md).

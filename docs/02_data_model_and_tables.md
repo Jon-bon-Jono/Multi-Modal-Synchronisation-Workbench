@@ -39,7 +39,11 @@ The canonical core should stay relatively stable. Convenience tables may evolve 
 
 ## 2. Relationship to the current ER diagram
 
-This file is aligned with the current canonical ER diagram in `sync_workbench_er_V0.1.mmd`.
+The [canonical ER diagram](architecture/er_diagram.mmd) reflects the logical
+table specifications in `src/sync_workbench/core/tables.py`, including payload
+versions. Its PK/FK annotations describe logical keys and relationships, not a
+complete set of SQLite constraints. The point-cloud migration adds unique
+indexes for the version registry, sample artifacts, and sample summaries.
 
 The current canonical entities are:
 
@@ -48,6 +52,8 @@ The current canonical entities are:
 - `RUN_SAMPLE`
 - `RUN_ASSET`
 - `SAMPLE_ARTIFACT`
+- `SAMPLE_SUMMARY`
+- `POINT_CLOUD_VERSION`
 - `RUN_TIMELINE_MODEL`
 - `SAMPLE_TIME_ESTIMATE`
 - `ANCHOR`
@@ -68,6 +74,11 @@ Use stable identifiers in the canonical tables. Avoid using file paths as keys.
 ### 3.2 Runs are uninterrupted acquisition segments
 
 A `run_id` identifies one uninterrupted device acquisition segment for one modality/device stream. If a sensor restarts, that is a new run.
+
+Reprocessing the same raw radar acquisition with different settings creates
+`POINT_CLOUD_VERSION` rows under the existing `radar_raw` run. It does not create
+new `DEVICE_RUN` or `RUN_SAMPLE` identities. The online `radar_pc` stream remains
+a separate acquisition stream.
 
 ### 3.3 `sample_index` is canonical within a run
 
@@ -138,6 +149,7 @@ Use the following naming pattern consistently:
 - `anchor_id`
 - `sync_model_id`
 - `mapping_version_id`
+- `point_cloud_version_id`
 
 ---
 
@@ -192,6 +204,9 @@ Represents one uninterrupted acquisition segment for one device/modality.
 
 **Important rule:** a sensor restart creates a new `DEVICE_RUN` row.
 
+Different offline point-cloud processing results share this run and its timeline;
+see [point-cloud payload versions](#12-point-cloud-payload-versions).
+
 ---
 
 ## 5.3 `RUN_SAMPLE`
@@ -243,6 +258,7 @@ Typical examples:
 | `storage_key` | string | no | Logical storage namespace / root group |
 | `asset_ref` | string | yes | Portable reference to the asset |
 | `notes` | string | no | Free-text notes |
+| `point_cloud_version_id` | string | no | Cloud version association; not part of the asset key |
 
 **Recommended implementation key:** `asset_id`  
 **Relationship key:** (`subject_id`, `run_id`, `device_type`) identifies the owning run.
@@ -289,8 +305,9 @@ Typical examples:
 | `payload_bytes` | int | no | Approximate per-sample payload byte count |
 | `created_at` | datetime | no | Creation timestamp |
 | `notes` | string | no | Free-text notes |
+| `point_cloud_version_id` | string | defaulted | Cloud version; empty for non-radar rows |
 
-**Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`, `artifact_role`)
+**Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`, `artifact_role`, `point_cloud_version_id`)
 
 **Recommended controlled values for `artifact_role`:**
 
@@ -311,7 +328,7 @@ Typical examples:
 
 ## 5.6 `SAMPLE_SUMMARY`
 
-Represents compact scalar per-sample fields useful for filtering, previews, and GUI navigation. This table is derived from payload metadata and should not contain large arrays.
+Represents compact scalar per-sample, per-payload-version fields useful for filtering, previews, and GUI navigation. This table is derived from payload metadata and should not contain large arrays.
 
 | Column | Type | Required | Meaning |
 |---|---|---:|---|
@@ -331,12 +348,16 @@ Represents compact scalar per-sample fields useful for filtering, previews, and 
 | `has_points` | bool | no | Whether a non-empty point-cloud payload is present |
 | `created_at` | datetime | no | Creation timestamp |
 | `notes` | string | no | Free-text notes |
+| `point_cloud_version_id` | string | defaulted | Cloud version; empty for non-radar rows |
+| `point_status` | string | defaulted | `available` or `unprocessed` for versioned raw clouds; empty for non-radar rows |
 
-**Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`)
+**Logical key:** (`subject_id`, `run_id`, `device_type`, `sample_index`, `point_cloud_version_id`)
 
-**v0.2.1 implementation note:** this is a convenience table for preview/filter workflows. Rich payloads remain in artifacts.
+An available empty cloud has zero point counts; an unprocessed frame has null
+point counts and no sample artifact. Both have `has_points = false`.
+Rich payloads remain in artifacts.
 
-## 5.6 `RUN_TIMELINE_MODEL`
+## 5.7 `RUN_TIMELINE_MODEL`
 
 Represents a run-specific model that assigns or refines times for samples in one run.
 
@@ -376,7 +397,7 @@ This is the **within-run** timing layer.
 
 ---
 
-## 5.7 `SAMPLE_TIME_ESTIMATE`
+## 5.8 `SAMPLE_TIME_ESTIMATE`
 
 Represents one assigned time for one sample under one timeline model.
 
@@ -414,7 +435,7 @@ This table is important because it prevents raw timestamps and modelled timestam
 
 ---
 
-## 5.8 `ANCHOR`
+## 5.9 `ANCHOR`
 
 Represents one manually defined correspondence event.
 
@@ -442,7 +463,7 @@ The anchor itself is intentionally model-independent.
 
 ---
 
-## 5.9 `ANCHOR_MEMBER`
+## 5.10 `ANCHOR_MEMBER`
 
 Represents the participation of a specific sample in a specific anchor.
 
@@ -471,7 +492,7 @@ This allows one anchor to include multiple modalities/runs/samples.
 
 ---
 
-## 5.10 `SYNC_MODEL`
+## 5.11 `SYNC_MODEL`
 
 Represents a model that maps one run timeline to another run timeline.
 
@@ -517,7 +538,7 @@ This is the **between-run** timing layer.
 
 ---
 
-## 5.11 `MODEL_ANCHOR`
+## 5.12 `MODEL_ANCHOR`
 
 Associates a sync model with the anchors it uses.
 
@@ -533,7 +554,7 @@ This table exists so that anchors remain durable, reusable objects while sync mo
 
 ---
 
-## 5.12 `MAPPING_VERSION`
+## 5.13 `MAPPING_VERSION`
 
 Represents one generated mapping output set.
 
@@ -571,7 +592,7 @@ A mapping version is derived from some method and often based on a sync model, b
 
 ---
 
-## 5.13 `SAMPLE_MAPPING`
+## 5.14 `SAMPLE_MAPPING`
 
 Represents one candidate or selected mapping pair between one source sample and one target sample.
 
@@ -650,8 +671,10 @@ The core intended relationships are:
 - one `SUBJECT` has many `DEVICE_RUN`s,
 - one `DEVICE_RUN` has many `RUN_SAMPLE`s,
 - one `DEVICE_RUN` has many `RUN_ASSET`s,
+- one `DEVICE_RUN` can have many `POINT_CLOUD_VERSION` rows,
 - one `RUN_SAMPLE` can have many `SAMPLE_ARTIFACT`s,
-- one `RUN_SAMPLE` can have one `SAMPLE_SUMMARY` row,
+- one `RUN_SAMPLE` can have many `SAMPLE_SUMMARY` rows, one per payload version,
+- one `POINT_CLOUD_VERSION` identifies cloud assets, sample artifacts, and summaries within its owning run,
 - one `RUN_TIMELINE_MODEL` assigns many `SAMPLE_TIME_ESTIMATE`s,
 - one `ANCHOR` has many `ANCHOR_MEMBER`s,
 - one `SYNC_MODEL` may use many anchors through `MODEL_ANCHOR`,
@@ -882,6 +905,22 @@ For video playback, `RUN_SAMPLE.sample_index` is the canonical zero-based frame 
 
 ## 12. Point-cloud payload versions
 
+This table registers processing results for an acquisition. Several results from
+one recording share a `DEVICE_RUN`; separate recordings have separate runs even
+when their processing settings match.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `subject_id`, `run_id`, `device_type` | string | Owning acquisition identity |
+| `point_cloud_version_id` | string | Result identifier within that acquisition |
+| `readable_label` | string | Human-readable label, not a settings identity |
+| `payload_fingerprint` | string | Validated payload/coverage and acquisition-binding fingerprint |
+| `acquisition_timeline_sha256` | string | Hash of the complete acquisition frame/timestamp catalogue |
+| `artifact_ref` | string | Relative bundle reference; can be empty for an unbuilt legacy cloud |
+| `artifact_sha256` | string | Imported bundle checksum |
+| `provenance_json` | JSON string | Imported version manifest and package metadata; legacy entries mark provenance unavailable |
+| `created_at` | datetime | Registry creation timestamp |
+
 `POINT_CLOUD_VERSION` is keyed by `(subject_id, run_id, device_type,
 point_cloud_version_id)`. It stores `readable_label`, `payload_fingerprint`,
 `acquisition_timeline_sha256`, `artifact_ref`, `artifact_sha256`, `provenance_json`,
@@ -891,7 +930,10 @@ legacy processing provenance/hashes are left unavailable, never invented.
 `RUN_ASSET`, `SAMPLE_ARTIFACT`, and `SAMPLE_SUMMARY` add
 `point_cloud_version_id`; the latter two include it in their logical keys.
 `RUN_ASSET.asset_id` remains its key; new raw bundle IDs include the version ID.
-Non-cloud rows use an empty version ID. `SAMPLE_SUMMARY.point_status` separates
+Non-radar rows use an empty version ID. Alignment/migration defaults radar rows
+to `online_original` or `raw_legacy`; a non-cloud radar run asset may therefore
+carry that default without identifying a registered cloud bundle.
+`SAMPLE_SUMMARY.point_status` separates
 `available` from `unprocessed`, whose point counts are null. Migration adds unique
 indexes for the registry and version-aware artifact/summary keys.
 
@@ -900,3 +942,22 @@ include cloud versions. A raw processing version changes observed payloads, not
 captured samples. Version-aware backend consumers select a payload version using
 the same mapping rows. See [the import contract and workflow](raw_point_cloud_package.md)
 for status, provenance, migration, and GUI/anchor-export behavior.
+
+### 12.1 Comparing processing settings across recordings
+
+For imported offline results, `provenance_json.version.processing_cfg` retains the
+processing configuration. `provenance_json.version.generator_metadata` retains
+`source_config_sha256`, `native_executable_sha256`, `native_version`,
+`calibration_sources`, `tracking_enabled`, and
+`tracking_state_start_sequence_index`, along with creation metadata.
+
+These fields provide evidence for comparing processing setups across runs.
+The version ID hashes the completed HDF5 checksum plus the acquisition and
+frame-numbering binding; it cannot be used to group equal settings across
+recordings. Even equivalent reruns can have different result IDs.
+
+SyncWB currently has no separate `processing_recipe_id` or automatic semantic
+settings-equivalence classification. A matching config hash alone does not
+establish equal generator/calibration settings; a different config hash can
+also reflect textual differences rather than changed effective parameters.
+Missing legacy provenance cannot establish either equality or a difference.

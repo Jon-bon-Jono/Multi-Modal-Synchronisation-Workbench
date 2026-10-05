@@ -1,5 +1,5 @@
 flowchart TD
-    A[device_runs.zst] --> R[TempPackageReader]
+    A[device_runs.zst] --> R[TempPackage.read]
     B[rgb_samples.zst] --> R
     C[radar_pc_samples.zst] --> R
     R --> V[Input validation]
@@ -13,3 +13,25 @@ flowchart TD
     M --> DB
     E --> DB
     T --> REP[Reports]
+
+    DB --> LEGACY[ArtifactBuildService: legacy packages only]
+    R --> LEGACY
+    LEGACY --> LNPZ[Run-level NPZ / JSONL bundles]
+    LEGACY --> LMETA[RUN_ASSET / SAMPLE_ARTIFACT / SAMPLE_SUMMARY]
+    LMETA --> DB
+
+    OLD[(Existing canonical database)] --> MIGRATE[migrate-point-clouds: copy then migrate]
+    MIGRATE --> VDB[(Migrated database copy)]
+    RAW[radar_raw_samples.zst + radar_raw_point_cloud_versions.json] --> CHECK[RawCloudPackage: checksum and contract validation]
+    A --> CHECK
+    CHECK --> IMPORT[RawPointCloudImportService]
+    VDB --> IMPORT
+    IMPORT --> ACQ[Verify/reuse acquisition samples and timeline; add missing raw acquisition rows]
+    IMPORT --> BUNDLE[Immutable point_cloud_versions/version_id/points.npz]
+    IMPORT --> VMETA[POINT_CLOUD_VERSION + versioned assets/artifacts/summaries]
+    ACQ --> VDB
+    VMETA --> VDB
+    MIGRATE --> REG[Register online_original / available raw_legacy payloads]
+    REG --> VDB
+    %% Versioned import requires an existing subject and a migrated schema.
+    %% Legacy ingest/build commands reject the versioned raw package.

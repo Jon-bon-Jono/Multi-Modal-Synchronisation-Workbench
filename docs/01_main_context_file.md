@@ -717,18 +717,12 @@ The v0.1 backend now implements a narrow but working first slice of the workbenc
 - versioned `MAPPING_VERSION` and `SAMPLE_MAPPING` rows,
 - conservative primary-mapping selection by default.
 
-v0.2.1 adds artifact payload storage and service-based payload access for RGB pose/activity payloads and radar point-cloud payloads. Manual anchors, piecewise affine synchronisation, and a GUI are still not implemented.
+v0.2.1 added artifact payload storage and service-based payload access. The
+current implementation also includes manual anchors, piecewise-affine fitting,
+an experimental GUI, versioned offline clouds, and portable student packages;
+see the implementation milestones below.
 
 ---
-
-## 18. Compact project summary
-
-In one paragraph:
-
-The Multi-Modal Synchronisation Workbench is a post hoc synchronisation framework for multimodal recordings captured on different devices and host systems with imperfect and heterogeneous timestamps. Its core design is to separate manual anchor correspondences, run-specific timeline estimation, cross-modal synchronisation models, and generated mapping outputs, while keeping provenance and uncertainty explicit. The project also treats asset storage as flexible and relocatable by using portable references plus modality-aware configurable roots rather than brittle absolute paths. The workbench is therefore not just a formula for matching frames; it is a structured system for representing uncertain time, human correspondence decisions, modelled timelines, and reproducible cross-modal mappings.
-
----
-
 
 ### 17.2 Current v0.2.1 implementation status
 
@@ -756,4 +750,40 @@ The v0.2.2 backend adds the first anchor-driven synchronisation feasibility laye
 - `experimental.feasibility` contains synthetic timeline cases and reports for probing piecewise-affine behaviour before applying it to real anchors.
 - `experimental.anchoring_gui` contains a deliberately minimal GUI client for one subject and one mapping pair at a time.
 
-The v0.2.2 GUI remains experimental. The official reusable pieces are the services and the `sync/piecewise_affine.py` algorithm code. The GUI must call services rather than reading temporary `.zst` files, artifact bundles, or SQLite tables directly.
+The GUI remains experimental. The reusable backend includes services and the
+`sync/piecewise_affine.py` algorithm. Payload access and anchor/mapping operations
+use services; the GUI session-selection adapter reads canonical registry/mapping
+metadata to offer compatible launch choices. It does not read temporary `.zst`
+files or decode artifact bundles directly.
+
+### 17.4 Versioned cloud payloads and student deployment
+
+- `POINT_CLOUD_VERSION` registers each offline processing result under an existing
+  `radar_raw` acquisition. Processing does not create new captured runs/samples.
+- `RUN_ASSET`, `SAMPLE_ARTIFACT`, and `SAMPLE_SUMMARY` carry the cloud version;
+  artifacts and summaries are keyed by version as well as sample identity.
+- `point_status` distinguishes available empty clouds from unprocessed frames.
+- Migration and raw import preserve acquisition timing, anchor endpoints and
+  mapping identities. The GUI fixes a cloud version before anchoring and records
+  the displayed version/settings in provenance.
+- Result IDs are distinct from settings equivalence. Config, executable and
+  calibration provenance are retained; no shared processing-recipe ID exists.
+- Portable assignments include a selected cloud, initial navigation mapping,
+  RGB video, poses and application setup. Transactional anchor saves/returns,
+  recovery snapshots, duplicate/conflict handling and frame-load safeguards are
+  implemented. Separate-computer dynamic testing and the final student guide
+  remain the WP3/WP4 work described in the deployment documentation.
+
+See the [current architecture](architecture/architecture_overview.md),
+[raw-cloud contract](raw_point_cloud_package.md),
+[student packages](student_package.md), and [anchor returns](anchor_returns.md).
+
+---
+
+## 18. Compact project summary
+
+In one paragraph:
+
+The Multi-Modal Synchronisation Workbench is a post hoc synchronisation framework for multimodal recordings captured on different devices and host systems with imperfect and heterogeneous timestamps. Its core design is to separate manual anchor correspondences, run-specific timeline estimation, cross-modal synchronisation models, and generated mapping outputs, while keeping provenance and uncertainty explicit. The project also treats asset storage as flexible and relocatable by using portable references plus modality-aware configurable roots rather than brittle absolute paths. The workbench is therefore not just a formula for matching frames; it is a structured system for representing uncertain time, human correspondence decisions, modelled timelines, and reproducible cross-modal mappings.
+
+---
