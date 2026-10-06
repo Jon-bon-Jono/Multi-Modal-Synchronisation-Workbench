@@ -767,12 +767,18 @@ files or decode artifact bundles directly.
   mapping identities. The GUI fixes a cloud version before anchoring and records
   the displayed version/settings in provenance.
 - Result IDs are distinct from settings equivalence. Config, executable and
-  calibration provenance are retained; no shared processing-recipe ID exists.
+  calibration provenance are retained. The training exporter computes a shared
+  recipe fingerprint in its manifest; canonical version IDs remain result IDs.
 - Portable assignments include a selected cloud, initial navigation mapping,
   RGB video, poses and application setup. Transactional anchor saves/returns,
   recovery snapshots, duplicate/conflict handling and frame-load safeguards are
   implemented. Separate-computer dynamic testing and the final student guide
   remain the WP3/WP4 work described in the deployment documentation.
+- `export-training-data` writes separate offline radar and Kinect 3D-pose HDF5
+  files per overlapping run pair, with shared GUI geometry, original/aligned
+  relative timestamps, person counts and radar-centred correspondences. Initial
+  and piecewise synchronization are supported as separate homogeneous exports.
+  See [training exports](training_export.md).
 
 See the [current architecture](architecture/architecture_overview.md),
 [raw-cloud contract](raw_point_cloud_package.md),

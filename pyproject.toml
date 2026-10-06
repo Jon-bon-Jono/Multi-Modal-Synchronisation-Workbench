@@ -18,7 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=14"]
-dev = ["pytest>=7", "pyarrow>=14", "zstandard>=0.22", "tabulate>=0.9", "matplotlib>=3.7"]
+hpe-export = ["h5py>=3.7"]
+dev = ["pytest>=7", "pyarrow>=14", "zstandard>=0.22", "tabulate>=0.9", "matplotlib>=3.7", "h5py>=3.7"]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13", "PyOpenGL>=3.1", "opencv-python>=4.8"]
 
 notebook = [

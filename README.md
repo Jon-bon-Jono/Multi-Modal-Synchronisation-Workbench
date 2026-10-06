@@ -156,6 +156,12 @@ which constructs immutable bundles and preserves captured-frame identities.
 
 ## Export a point-cloud/raw-radar test sequence
 
+For reusable HPE datasets, use `export-training-data` instead. It exports separate
+offline radar and Kinect 3D-pose HDF5 files per overlapping run pair, with shared
+GUI geometry, relative timestamps, radar-centred correspondence and strict recipe/
+mapping consistency. See [training exports and the 19_MM command](docs/training_export.md).
+The older one-off online-cloud utility below is a different workflow.
+
 The short-lived exporter accepts original one-based RGB and point-cloud frame
 ranges and an RGB-to-PC mapping version:
 

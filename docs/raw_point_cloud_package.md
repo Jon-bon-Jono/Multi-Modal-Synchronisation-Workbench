@@ -159,8 +159,10 @@ For cross-recording settings comparisons, use the retained `processing_cfg` and
 `generator_metadata`, stored after import under `POINT_CLOUD_VERSION.provenance_json.version`.
 Compare the config, executable/version, calibration sources and tracking setup;
 the config hash alone is insufficient. Result IDs and readable labels do not
-establish settings equivalence. SyncWB does not currently assign a shared
-`processing_recipe_id` or automatically classify equivalent settings across runs.
+establish settings equivalence. The canonical registry does not assign a shared
+`processing_recipe_id`. The [training exporter](training_export.md) computes a
+conservative recipe fingerprint for export validation; it does not attempt
+automatic semantic equivalence between different configurations.
 See [the data-model comparison fields](02_data_model_and_tables.md#121-comparing-processing-settings-across-recordings).
 
 ## Anchor and mapping compatibility

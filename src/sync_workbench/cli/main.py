@@ -51,6 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     verify_student = sub.add_parser("verify-student-package", help="Verify immutable package files without opening the GUI")
     verify_student.add_argument("--package", required=True)
 
+    training = sub.add_parser("export-training-data", help="Export separate raw-cloud/3D-pose HDF5 files per overlapping segment")
+    training.add_argument("--sqlite", required=True)
+    training.add_argument("--artifact-root", required=True)
+    training.add_argument("--output", required=True, help="New directory outside input and protected roots")
+    training.add_argument("--subject", action="append", dest="subjects", help="Repeat for multiple subjects")
+    training.add_argument("--mapping-version", help="Exact mapping ID for each selected subject")
+    cloud = training.add_mutually_exclusive_group()
+    cloud.add_argument("--point-cloud-version", help="Exact raw result ID")
+    cloud.add_argument("--point-cloud-label", help="Exact readable label; ambiguous labels are rejected")
+    training.add_argument("--selection", help="JSON list of subject_id/mapping_version_id/point_cloud_version_id for multiple run pairs")
+    training.add_argument("--read-only-root", action="append", default=[])
+    training.add_argument("--gap-factor", type=float, default=3.0, help="Mark sequence boundaries at gaps greater than this many nominal periods; files remain per run pair")
+    training.add_argument("--dry-run", action="store_true", help="Read-only selection/timeline preflight; does not load payload arrays or create output")
+
     ingest = sub.add_parser("ingest-temp", help="Convert temporary zst ingestion files into a canonical SQLite store")
     ingest.add_argument("--input", required=True, help="Folder containing device_runs.zst and available sample .zst files")
     ingest.add_argument("--sqlite", required=True, help="Output SQLite store path")
@@ -234,6 +248,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.command == "export-training-data":
+        from sync_workbench.services.training_export_service import export_training_data
+        if args.selection and any((args.subjects, args.mapping_version, args.point_cloud_version, args.point_cloud_label)):
+            raise ValueError("Use --selection or subject/mapping/cloud options, not both")
+        selections = json.loads(Path(args.selection).read_text(encoding="utf-8")) if args.selection else None
+        result = export_training_data(sqlite_path=args.sqlite, artifact_root=args.artifact_root,
+            output=args.output, selections=selections, subjects=args.subjects,
+            mapping_version_id=args.mapping_version, point_cloud_version_id=args.point_cloud_version,
+            point_cloud_label=args.point_cloud_label, read_only_roots=args.read_only_root,
+            gap_factor=args.gap_factor, dry_run=args.dry_run)
+        print(json.dumps(result, indent=2))
+        return 0
 
     if args.command == "export-student-package":
         from sync_workbench.deployment.student_package import export_student_package

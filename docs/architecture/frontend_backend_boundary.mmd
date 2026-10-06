@@ -16,6 +16,7 @@ flowchart LR
         ASSET[AssetService]
         RAW[RawPointCloudImportService]
         AUDIT[ArtifactAuditService]
+        TRAIN[Training export service]
     end
 
     subgraph Official_Backend
@@ -25,6 +26,7 @@ flowchart LR
         ARTIFACTS[ArtifactStore]
         VALIDATE[RawCloudPackage validation]
         DEPLOY[Portable student deployment / anchor returns]
+        GEOMETRY[Shared core geometry]
     end
 
     GUI --> PAYLOAD
@@ -37,8 +39,10 @@ flowchart LR
     CLI --> RAW
     CLI --> AUDIT
     CLI --> DEPLOY
+    CLI --> TRAIN
     CLI --> PAIR
     GUI --> SELECT
+    GUI --> GEOMETRY
     SELECT --> SQLITE
     NB --> Services
 
@@ -53,6 +57,10 @@ flowchart LR
     AUDIT --> ARTIFACTS
     DEPLOY --> SQLITE
     DEPLOY --> BUNDLES
+    TRAIN --> SQLITE
+    TRAIN --> BUNDLES
+    TRAIN --> GEOMETRY
+    TRAIN --> HDF5[Separate radar / pose HDF5 + manifest]
     PIECEWISE --> ALG
     PIECEWISE --> STORAGE
     ANCHOR --> STORAGE

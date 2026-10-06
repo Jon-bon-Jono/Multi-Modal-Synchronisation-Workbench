@@ -430,10 +430,12 @@ artifact/summary keys, and immutable offline bundles. A processing change does
 not create a new `DEVICE_RUN`. Acquisition samples, timeline estimates, anchor
 endpoints and mapping keys stay independent of cloud version.
 
-Cross-session recipe grouping remains unimplemented. The retained processing
-configuration and generator/calibration provenance support comparison, but
-there is no shared `processing_recipe_id` or automatic semantic-equivalence
-classifier. See [comparison fields](02_data_model_and_tables.md#121-comparing-processing-settings-across-recordings).
+The training exporter now computes a conservative `processing_recipe_id` from
+retained configuration and generator/calibration provenance and refuses mixed
+recipes. This identity lives in the export manifest. Canonical recipe management
+and automatic semantic-equivalence classification remain future work. See
+[comparison fields](02_data_model_and_tables.md#121-comparing-processing-settings-across-recordings)
+and [training exports](training_export.md).
 
 Portable student assignments, remembered annotator identity, transactional
 anchor saves/imports, recovery snapshots, duplicate/conflict handling and frame

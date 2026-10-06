@@ -607,3 +607,13 @@ transactional saves, recovery snapshots and GUI safeguards are described in
 [anchor returns and recovery](anchor_returns.md). Student returns require their
 original package manifest; conflicts reject the whole file and identical retries
 do not duplicate anchors.
+
+## 19. HPE training datasets
+
+`export-training-data` creates independent radar and Kinect 3D-pose HDF5 files
+for each overlapping run pair. It supports initial identity-time and fitted
+piecewise mappings, checks one shared processing recipe/mapping profile, and
+preserves multi-person pose ordering, counts, confidence and relative timestamps.
+Use `--dry-run` for metadata preflight. See [the export contract and prepared
+19_MM instructions](training_export.md). Source databases, artifacts and explicitly
+protected recording roots remain read-only.

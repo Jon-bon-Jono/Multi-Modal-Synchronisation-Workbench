@@ -956,8 +956,12 @@ The version ID hashes the completed HDF5 checksum plus the acquisition and
 frame-numbering binding; it cannot be used to group equal settings across
 recordings. Even equivalent reruns can have different result IDs.
 
-SyncWB currently has no separate `processing_recipe_id` or automatic semantic
-settings-equivalence classification. A matching config hash alone does not
+The canonical store has no separate `processing_recipe_id` or automatic semantic
+settings-equivalence classification. The [training exporter](training_export.md)
+now computes a conservative recipe fingerprint from recorded configuration,
+generator and calibration metadata, and rejects mixed recipes. It records this
+ID in the export manifest rather than adding a canonical table/column.
+A matching config hash alone does not
 establish equal generator/calibration settings; a different config hash can
 also reflect textual differences rather than changed effective parameters.
 Missing legacy provenance cannot establish either equality or a difference.

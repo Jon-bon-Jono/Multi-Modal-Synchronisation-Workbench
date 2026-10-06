@@ -38,6 +38,13 @@ adapter also reads canonical registry/mapping metadata to find compatible choice
 
 ## Acquisition and payload versions
 
+`services/training_export_service.py` implements the read-only HPE export boundary:
+homogeneous cloud/mapping selection, supported run overlap, common relative time,
+radar-centred nearest-pose correspondence and separate modality HDF5 files.
+GUI and export share the versioned approximate transform in `core/geometry.py`.
+The export manifest freezes recipe/profile/release identities without changing
+the canonical schema. See [training exports](../training_export.md).
+
 One `DEVICE_RUN` represents one uninterrupted acquisition. Its `RUN_SAMPLE` rows,
 timeline estimates, anchor endpoints and mapping rows are shared across offline
 processing results. `POINT_CLOUD_VERSION` registers those results; `RUN_ASSET`,
@@ -54,7 +61,8 @@ are registered. See [the import contract](../raw_point_cloud_package.md).
 
 Version IDs identify completed results bound to their acquisitions. Cross-session
 settings comparison uses the configuration and generator/calibration provenance;
-there is no implemented shared processing-recipe identifier.
+the training exporter computes a conservative shared recipe fingerprint in its
+manifest. The canonical cloud registry continues to store result identities.
 
 ## GUI sessions and portable assignments
 
