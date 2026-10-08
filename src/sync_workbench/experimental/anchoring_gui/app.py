@@ -20,6 +20,7 @@ def run_anchoring_gui(
     package_provenance: dict | None = None,
     pose_predictions_path: str | Path | None = None,
     pose_prediction_array: str = "pred_globally_aligned",
+    spatial_calibration_path: str | Path | None = None,
 ) -> int:
     try:
         from PySide6.QtWidgets import QApplication  # type: ignore
@@ -52,6 +53,7 @@ def run_anchoring_gui(
         package_provenance=package_provenance,
         pose_predictions_path=pose_predictions_path,
         pose_prediction_array=pose_prediction_array,
+        spatial_calibration_path=spatial_calibration_path,
     )
     try:
         MainWindow = make_main_window_class()

@@ -220,12 +220,12 @@ def _project_kinect_xyz_to_digital(xyz: np.ndarray) -> np.ndarray:
     return uv
 
 
-def project_pc_to_digital(points: np.ndarray | None, *, filter_noise: bool = False, max_points: int | None = 8000) -> np.ndarray:
+def project_pc_to_digital(points: np.ndarray | None, *, filter_noise: bool = False, max_points: int | None = 8000, calibration=None) -> np.ndarray:
     """Project radar point-cloud points to Kinect RGB digital image coordinates.
 
-    This follows the old exploratory code path: radar PC metres -> millimetres,
-    then approximate Kinect coordinates [x, z, y], then Kinect colour digital
-    projection.
+    With calibration, first map radar metres to native Kinect depth-camera
+    millimetres. Otherwise use the legacy inverse axis conversion. Both paths
+    then use the existing Kinect depth-to-colour projection parameters.
     """
     arr = valid_points(points, filter_noise=filter_noise)
     if arr.size == 0:
@@ -233,8 +233,11 @@ def project_pc_to_digital(points: np.ndarray | None, *, filter_noise: bool = Fal
     if max_points is not None and arr.shape[0] > int(max_points):
         step = max(1, int(math.ceil(arr.shape[0] / int(max_points))))
         arr = arr[::step]
-    pts3d = arr[:, :3].astype(float) * 1e3
-    cam_coords = np.column_stack([pts3d[:, 0], -pts3d[:, 2], pts3d[:, 1]])
+    if calibration is None:
+        pts3d = arr[:, :3].astype(float) * 1e3
+        cam_coords = np.column_stack([pts3d[:, 0], -pts3d[:, 2], pts3d[:, 1]])
+    else:
+        cam_coords = calibration.radar_m_to_kinect_mm(arr[:, :3])
     out = np.empty((cam_coords.shape[0], 2), dtype=float)
     for idx, xyz in enumerate(cam_coords):
         out[idx] = _project_kinect_xyz_to_digital(xyz)

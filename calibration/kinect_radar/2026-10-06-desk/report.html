@@ -1,0 +1,74 @@
+<!doctype html><meta charset="utf-8"><title>Desk calibration — 2026-10-06</title>
+<style>body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 24px;line-height:1.5;color:#162334}table{border-collapse:collapse;width:100%}td,th{padding:8px;border-bottom:1px solid #cbd5e1;text-align:left}pre{background:#eef2f6;padding:16px;overflow:auto}h2{margin-top:40px}.note{background:#fff2d7;padding:16px}</style>
+<h1>Desk calibration — 2026-10-06</h1>
+<p>Only labels created on 2026-10-06 in Australia/Sydney are used. desk_front_1_radar is excluded. All saved cap corrections are applied before converting Kinect coordinates to X right, Y forward, Z up.</p>
+<p><b>Coordinate conversion:</b> Kinect (x, y, z) → (x, z, −y). The example (0.190, 0.029, 0.411) m becomes (0.190, 0.411, −0.029) m before cap correction. Shared axis naming does not eliminate the physical sensor rotation and translation.</p>
+<p class="note">The three _1 points are nearly collinear and yield an unstable rotation. Neither fit is certified as accurate. Compare held-out errors and collect height diversity before relying on the result.</p>
+<h2>Input audit</h2><table><tr><th>Session</th><th>Status used</th><th>Radar / Kinect frames</th><th>Cap plane worst RMS (mm)</th></tr>
+<tr><td>desk_front_1</td><td>accepted</td><td>4 / 3</td><td>0.495</td></tr>
+<tr><td>desk_front_2</td><td>accepted</td><td>4 / 3</td><td>0.727</td></tr>
+<tr><td>desk_left_1</td><td>accepted</td><td>4 / 1</td><td>0.419</td></tr>
+<tr><td>desk_left_2</td><td>draft</td><td>4 / 3</td><td>0.632</td></tr>
+<tr><td>desk_right_1</td><td>accepted</td><td>4 / 3</td><td>0.520</td></tr>
+<tr><td>desk_right_2</td><td>accepted</td><td>4 / 3</td><td>0.777</td></tr>
+</table>
+<p>desk_left_1: one selected Kinect frame, so temporal repeatability is unavailable.</p>
+<p>desk_left_2: Kinect recording queue overflow; recording incomplete; 9 saved frames; 11 missing time samples. Selected intervals (s): [2.400056, 0.199933]. Selected frames are intact. The draft exception is explicit; the original label and recording status are unchanged.</p>
+<h2>desk_all</h2><p><a href="desk_all.json">Full precision JSON, source provenance and both transform directions</a></p>
+<p><b>fit</b>: 6 placements; RMSE 29.99 mm; maximum 39.21 mm.</p>
+<p>Leave-one-placement-out cross-validation RMSE: 38.83 mm.</p>
+<table><tr><th>Placement</th><th>Role</th><th>Euclidean error (mm)</th></tr>
+<tr><td>desk_front_1</td><td>fit</td><td>25.74</td></tr>
+<tr><td>desk_front_2</td><td>fit</td><td>20.89</td></tr>
+<tr><td>desk_left_1</td><td>fit</td><td>39.21</td></tr>
+<tr><td>desk_left_2</td><td>fit</td><td>26.75</td></tr>
+<tr><td>desk_right_1</td><td>fit</td><td>27.82</td></tr>
+<tr><td>desk_right_2</td><td>fit</td><td>35.65</td></tr>
+</table><p>Radar → Kinect (both in X right, Y forward, Z up):</p><pre>[[ 0.998993173 -0.020357312 -0.039977736  0.14852414 ]
+ [ 0.022635265  0.998095769  0.057380148 -0.089629909]
+ [ 0.038733504 -0.058227283  0.997551652 -0.093886796]
+ [ 0.           0.           0.           1.         ]]</pre>
+<p>Kinect → radar (both in X right, Y forward, Z up):</p><pre>[[ 0.998993173  0.022635265  0.038733504 -0.142709241]
+ [-0.020357312  0.998095769 -0.058227283  0.087016012]
+ [-0.039977736  0.057380148  0.997551652  0.104737565]
+ [ 0.           0.           0.           1.         ]]</pre>
+<ul><li>Rigid least squares with equal weight per placement; no scale, range bias or radar phase-centre model.</li><li>Fit residuals measure agreement on fitting points, not independent calibration accuracy.</li><li>Fixed sensor mounting across sessions is assumed from the requested collection and saved protocol attestations.</li><li>kinect points are approximately planar; little height diversity is available.</li><li>Includes explicitly authorized desk_left_2 draft from an incomplete Kinect recording.</li></ul>
+<h2>desk_suffix_1</h2><p><a href="desk_suffix_1.json">Full precision JSON, source provenance and both transform directions</a></p>
+<p><b>fit</b>: 3 placements; RMSE 23.00 mm; maximum 26.62 mm.</p>
+<p><b>held_out</b>: 3 placements; RMSE 352.37 mm; maximum 517.50 mm.</p>
+<table><tr><th>Placement</th><th>Role</th><th>Euclidean error (mm)</th></tr>
+<tr><td>desk_front_1</td><td>fit</td><td>24.07</td></tr>
+<tr><td>desk_left_1</td><td>fit</td><td>17.29</td></tr>
+<tr><td>desk_right_1</td><td>fit</td><td>26.62</td></tr>
+<tr><td>desk_front_2</td><td>held_out</td><td>517.50</td></tr>
+<tr><td>desk_left_2</td><td>held_out</td><td>247.73</td></tr>
+<tr><td>desk_right_2</td><td>held_out</td><td>208.14</td></tr>
+</table><p>Radar → Kinect (both in X right, Y forward, Z up):</p><pre>[[ 0.988757225  0.148360523 -0.018662938  0.062272681]
+ [-0.040779757  0.387625039  0.920914676  0.143610384]
+ [ 0.143861605 -0.90979997   0.389317164  0.418328989]
+ [ 0.           0.           0.           1.         ]]</pre>
+<p>Kinect → radar (both in X right, Y forward, Z up):</p><pre>[[ 0.988757225 -0.040779757  0.143861605 -0.115897646]
+ [ 0.148360523  0.387625039 -0.90979997   0.315689913]
+ [-0.018662938  0.920914676  0.389317164 -0.293953374]
+ [ 0.           0.           0.           1.         ]]</pre>
+<ul><li>Rigid least squares with equal weight per placement; no scale, range bias or radar phase-centre model.</li><li>Fit residuals measure agreement on fitting points, not independent calibration accuracy.</li><li>Fixed sensor mounting across sessions is assumed from the requested collection and saved protocol attestations.</li><li>radar points are approximately planar; little height diversity is available.</li><li>kinect points are nearly collinear: rotation about the placement line is poorly constrained.</li><li>kinect points are approximately planar; little height diversity is available.</li><li>Three placements provide the minimum fit, with no redundancy for robust outlier rejection.</li></ul>
+<h2>desk_accepted_only_sensitivity</h2><p><a href="desk_accepted_only_sensitivity.json">Full precision JSON, source provenance and both transform directions</a></p>
+<p><b>fit</b>: 5 placements; RMSE 30.09 mm; maximum 41.36 mm.</p>
+<p>Leave-one-placement-out cross-validation RMSE: 44.14 mm.</p>
+<table><tr><th>Placement</th><th>Role</th><th>Euclidean error (mm)</th></tr>
+<tr><td>desk_front_1</td><td>fit</td><td>29.82</td></tr>
+<tr><td>desk_front_2</td><td>fit</td><td>19.97</td></tr>
+<tr><td>desk_left_1</td><td>fit</td><td>41.36</td></tr>
+<tr><td>desk_right_1</td><td>fit</td><td>25.22</td></tr>
+<tr><td>desk_right_2</td><td>fit</td><td>29.89</td></tr>
+</table><p>Radar → Kinect (both in X right, Y forward, Z up):</p><pre>[[ 0.999105025 -0.024680462 -0.034351474  0.145396281]
+ [ 0.026555827  0.998119186  0.055252868 -0.089238436]
+ [ 0.032923199 -0.056115649  0.997881304 -0.095005654]
+ [ 0.           0.           0.           1.         ]]</pre>
+<p>Kinect → radar (both in X right, Y forward, Z up):</p><pre>[[ 0.999105025  0.026555827  0.032923199 -0.139768465]
+ [-0.024680462  0.998119186 -0.056115649  0.087327738]
+ [-0.034351474  0.055252868  0.997881304  0.104729622]
+ [ 0.           0.           0.           1.         ]]</pre>
+<ul><li>Rigid least squares with equal weight per placement; no scale, range bias or radar phase-centre model.</li><li>Fit residuals measure agreement on fitting points, not independent calibration accuracy.</li><li>Fixed sensor mounting across sessions is assumed from the requested collection and saved protocol attestations.</li><li>kinect points are approximately planar; little height diversity is available.</li></ul>
+<h2>Apply to Kinect skeleton points</h2><p>For native Kinect SDK XYZ in millimetres, divide by 1000. Then either reorder to (x,z,−y) and use kinect_to_radar_4x4, or use native_kinect_to_radar_4x4 directly without reordering. The cap offset is specific to calibration labels and must not be applied to skeleton joints.</p>
+<h2>Reproduce</h2><p>From the project root using the etl environment; choose a new output directory:</p><pre>python tools/adc_viewer/calibrate_desk.py sessions calibration_results/new-run --date 2026-10-06 --timezone Australia/Sydney --allow-incomplete-kinect-session desk_left_2</pre>

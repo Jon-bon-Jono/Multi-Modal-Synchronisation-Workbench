@@ -60,6 +60,33 @@ def test_session_choices_and_strict_acquisition_binding(sessions):
     assert resolve_session(db,root,'P','online_map').point_cloud_version_id == 'online_original'
 
 
+def test_calibration_reaches_gui_and_anchor_provenance(sessions, qt_app, tmp_path, monkeypatch):
+    from test_spatial_calibration import write_calibration
+    from sync_workbench.core.geometry import pose3d_to_world
+    from sync_workbench.experimental.anchoring_gui.main_window import make_main_window_class
+    path = write_calibration(tmp_path)
+    c = controller(sessions, sessions[2][0], spatial_calibration_path=path)
+    pose = np.full((1,32,4), [1000.,2000.,3000.,1.])
+    monkeypatch.setattr(c, 'get_source_pose3d', lambda sample: pose)
+    window = make_main_window_class()(c)
+    try:
+        window.show_pose3d_in_pointcloud = True
+        window.refresh_target()
+        np.testing.assert_allclose(window.point_panel.pose_scatter.pos,
+                                   pose3d_to_world(pose, calibration=c.spatial_calibration).reshape(-1,3), rtol=1e-6)
+        assert path.name in window._session_details
+        c.place_anchor(0,0,label='calibrated')
+        exported = c.export_anchors(tmp_path/'calibrated_anchors.json')
+        geometry = exported['session']['geometry']
+        assert geometry['spatial_calibration']['sha256'] == c.spatial_calibration.sha256
+        assert json.loads(exported['ANCHOR'][0]['notes'])['provenance']['geometry'] == geometry
+    finally:
+        window.close()
+        c.close()
+    with pytest.raises(ValueError, match='radar_raw'):
+        controller(sessions, 'online_original', mapping='online_map', spatial_calibration_path=path)
+
+
 def test_controller_reads_selected_version_and_preserves_anchor_provenance(sessions,tmp_path):
     db,root,ids=sessions
     first=controller(sessions,ids[0])

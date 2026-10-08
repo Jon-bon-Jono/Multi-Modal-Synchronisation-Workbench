@@ -23,7 +23,7 @@ def _imports():
     return gl, Qt
 
 class PointCloudPanel:
-    def __new__(cls):
+    def __new__(cls, *, calibration=None):
         gl, Qt = _imports()
 
         class _PointCloudPanel(gl.GLViewWidget):
@@ -220,7 +220,7 @@ class PointCloudPanel:
             def _set_pose3d(self, pose3d: np.ndarray | None) -> None:
                 self._clear_pose_lines()
 
-                pose_world = pose3d_to_world(pose3d)
+                pose_world = pose3d_to_world(pose3d, calibration=calibration)
 
                 if pose_world.size == 0:
                     self.pose_scatter.setData(pos=np.empty((0, 3), dtype=float))

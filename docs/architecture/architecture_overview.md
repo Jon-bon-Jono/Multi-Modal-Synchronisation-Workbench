@@ -41,7 +41,10 @@ adapter also reads canonical registry/mapping metadata to find compatible choice
 `services/training_export_service.py` implements the read-only HPE export boundary:
 homogeneous cloud/mapping selection, supported run overlap, common relative time,
 radar-centred nearest-pose correspondence and separate modality HDF5 files.
-GUI and export share the versioned approximate transform in `core/geometry.py`.
+GUI and export share geometry in `core/geometry.py`: optional validated desk-v2
+Kinect/raw-radar extrinsics followed by the historical floor transform. Calibration
+is fixed per session/export and embedded with its hash in geometry provenance;
+see [spatial calibration](../spatial_calibration.md).
 The export manifest freezes recipe/profile/release identities without changing
 the canonical schema. See [training exports](../training_export.md).
 

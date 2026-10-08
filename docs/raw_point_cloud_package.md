@@ -1,6 +1,9 @@
 # Versioned offline raw point-cloud temporary package
 
 Status: the ETL producer and SyncWB version-aware backend are implemented.
+For combined Kinect/offline packages and progressive subject additions, use
+[`import-package`](additive_ingestion.md). It accepts the files together, stages
+both modalities, and adds missing data without resetting the master database.
 Use `migrate-point-clouds` and `import-raw-point-clouds` below. The GUI now
 selects a single cloud before launch and records that selection in anchor/export
 provenance.
@@ -18,7 +21,8 @@ this package so they cannot discard its version/status contract.
 - `point_count_filtered` excludes exactly GTRACK IDs 253, 254, and 255. IDs 250,
   251, and 252 remain. This is a visualization policy, not a detector-quality or
   people-count assertion. `point_count` counts every stored point.
-- No new geometry metadata contract or spatial transformation is introduced.
+- Package import does not transform geometry. Optional [spatial calibration](spatial_calibration.md)
+  is applied later by the GUI and training exporter, with its own geometry provenance.
   Original generator metadata/config are retained for provenance only. Geometry
   corrections are deferred.
 - One source/version is selected BEFORE an anchoring session and remains fixed
@@ -289,8 +293,10 @@ already exist. Navigation mappings are estimates, not anchor-fitted alignment.
 The anchoring window shows the fixed selection in a banner and its full ID in a
 tooltip. It has no source/version switching control. Opening a different version
 requires closing the session and starting another. It starts on the first mapped
-source/target pair; the displayed frames and sample boxes agree. Existing geometry
-and optional RGB projection are shared across online/raw clouds. Existing pose
+source/target pair; the displayed frames and sample boxes agree. The default geometry
+and optional RGB projection are shared across online/raw clouds. Raw sessions can
+add `--spatial-calibration PATH` for [calibrated Kinect alignment](spatial_calibration.md).
+Existing pose
 prediction files are indexed to online samples and are rejected for raw sessions;
 omit `--pose-predictions` when using raw until version-bound raw predictions are
 implemented.

@@ -39,6 +39,10 @@ def insert_rows(conn, table, rows):
 class RawPointCloudImportService:
     def import_package(self, input_dir, sqlite_path, artifact_root):
         package = RawCloudPackage.read(input_dir)
+        return self.import_validated_package(package, input_dir, sqlite_path, artifact_root)
+
+    def import_validated_package(self, package: RawCloudPackage, input_dir, sqlite_path, artifact_root):
+        """Install a package returned by RawCloudPackage.read; permits shared import staging."""
         root = Path(artifact_root).resolve()
         root.mkdir(parents=True, exist_ok=True)
         installed = []

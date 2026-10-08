@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import uuid
 
 from sync_workbench.core.tables import TABLE_SPECS
+from sync_workbench.core.geometry import load_spatial_calibration
 from sync_workbench.services.anchor_transfer import acquisition_digest
 from sync_workbench.deployment.package_layout import SCHEMA, json_digest, local_path, sha256, verify_package, write_json
 from sync_workbench.experimental.anchoring_gui.session_selection import resolve_session
@@ -161,6 +162,12 @@ def _copy_application(root, application_root):
         destination = root / "application" / file.relative_to(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(file, destination)
+    for name in ("spatial_calibration.md", "student_package.md", "training_export.md"):
+        file = source / "docs" / name
+        if file.is_file():
+            destination = root / "application/docs" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(file, destination)
     (root / "requirements.txt").write_text(REQUIREMENTS, encoding="utf-8")
     code = [{"path": p.relative_to(root).as_posix(), "sha256": sha256(p)} for p in sorted((root / "application").rglob("*")) if p.is_file()]
     return json_digest({"files": code, "requirements": REQUIREMENTS, "python": "3.11"})[:20]
@@ -171,8 +178,24 @@ def _write_launchers(root, runtime_id):
     write_conda_launchers(root, runtime_id)
 
 
+def bundle_spatial_calibration(root, path, target_device_type):
+    """Copy an optional validated calibration into the immutable portable package."""
+    calibration = load_spatial_calibration(path)
+    if calibration is None:
+        return None
+    if target_device_type != "radar_raw":
+        raise ValueError("Spatial calibration requires an offline radar_raw assignment")
+    ref = "calibration/kinect_radar/" + Path(path).name
+    destination = local_path(root, ref)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, destination)
+    if sha256(destination) != calibration.sha256:
+        raise ValueError("Spatial calibration changed while packaging")
+    return {"path": ref, "sha256": calibration.sha256}
+
+
 def export_student_package(*, sqlite_path, artifact_root, rgb_root, output, subject_id, mapping_version_id,
-                           point_cloud_version_id, application_root=None, read_only_roots=()):
+                           point_cloud_version_id, application_root=None, read_only_roots=(), spatial_calibration_path=None):
     output = Path(output).resolve()
     source = Path(sqlite_path).resolve()
     protected = [Path(p).resolve() for p in (artifact_root, rgb_root, *read_only_roots)]
@@ -181,11 +204,16 @@ def export_student_package(*, sqlite_path, artifact_root, rgb_root, output, subj
     if output.exists():
         raise FileExistsError("Choose a new package output folder; existing work is never overwritten")
     selection = resolve_session(source, artifact_root, subject_id, mapping_version_id, point_cloud_version_id)
+    if spatial_calibration_path is not None:
+        calibration_path = Path(spatial_calibration_path).resolve()
+        if output == calibration_path or output.is_relative_to(calibration_path) or calibration_path.is_relative_to(output):
+            raise ValueError("Package output overlaps the spatial calibration input")
     output.parent.mkdir(parents=True, exist_ok=True)
     package_id = "student_" + uuid.uuid4().hex
     with TemporaryDirectory(prefix=".syncwb-package-", dir=output.parent) as staging:
         root = Path(staging) / "package"
         (root / "database").mkdir(parents=True)
+        calibration = bundle_spatial_calibration(root, spatial_calibration_path, selection.target_device_type)
         with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
@@ -204,18 +232,22 @@ def export_student_package(*, sqlite_path, artifact_root, rgb_root, output, subj
         config = {"schema": SCHEMA, "package_id": package_id, "assignment": assignment,
                   "paths": {"database_template": "database/template.sqlite", "working_database": "work/workbench.sqlite",
                             "artifact_root": "assets/artifacts", "rgb_root": "assets/rgb"}}
+        if calibration is not None:
+            config["spatial_calibration"] = calibration
         write_json(root / "config.json", config)
         files = []
         for p in sorted(root.rglob("*")):
             if p.is_file():
                 ref = p.relative_to(root).as_posix()
-                role = "asset" if ref.startswith("assets/") else "database_template" if ref.startswith("database/") else "runtime"
+                role = "asset" if ref.startswith("assets/") else "database_template" if ref.startswith("database/") else "calibration" if ref.startswith("calibration/") else "runtime"
                 files.append({"path": ref, "bytes": p.stat().st_size, "sha256": sha256(p), "role": role})
         manifest = {"schema": SCHEMA, "package_id": package_id, "created_at": datetime.now(timezone.utc).isoformat(),
                     "assignment": assignment, "runtime_id": runtime_id, "python": "3.11", "acquisition_sha256": capture_digest,
                     "cloud_provenance": selection.cloud_provenance(), "table_counts": {t: len(rows) for t, rows in tables.items()},
                     "pose_roles": sorted({r["artifact_role"] for r in tables["SAMPLE_ARTIFACT"] if r["device_type"] == "kinect_rgb"}),
                     "assets": assets, "files": files}
+        if calibration is not None:
+            manifest["spatial_calibration"] = calibration
         manifest["manifest_sha256"] = json_digest(manifest)
         write_json(root / "manifest.json", manifest)
         verify_package(root)

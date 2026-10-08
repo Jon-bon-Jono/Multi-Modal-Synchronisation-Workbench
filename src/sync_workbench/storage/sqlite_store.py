@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from contextlib import closing
 
 import numpy as np
 import pandas as pd
@@ -28,7 +29,7 @@ class SQLiteCoreStore:
         return conn
 
     def initialise_empty(self) -> None:
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             for name, spec in TABLE_SPECS.items():
                 empty = spec.empty()
                 empty.to_sql(name, conn, if_exists="replace", index=False)
@@ -37,20 +38,20 @@ class SQLiteCoreStore:
         if name not in TABLE_SPECS:
             raise KeyError(f"Unknown canonical table: {name}")
         out = align_to_spec(name, df)
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             out.to_sql(name, conn, if_exists=if_exists, index=False)
 
     def read_table(self, name: str) -> pd.DataFrame:
         if name not in TABLE_SPECS:
             raise KeyError(f"Unknown canonical table: {name}")
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             try:
                 return align_to_spec(name, pd.read_sql_query(f'SELECT * FROM "{name}"', conn))
             except Exception:
                 return TABLE_SPECS[name].empty()
 
     def list_tables(self) -> list[str]:
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
         return [r[0] for r in rows]
 
@@ -68,7 +69,7 @@ class SQLiteCoreStore:
         where = " AND ".join(f'"{col}" = ?' for col in filters)
         values = tuple(filters.values())
 
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             try:
                 row = conn.execute(
                     f'SELECT 1 FROM "{name}" WHERE {where} LIMIT 1',
@@ -93,7 +94,7 @@ class SQLiteCoreStore:
         where = " AND ".join(f'"{col}" = ?' for col in filters)
         values = tuple(filters.values())
 
-        with self.connect() as conn:
+        with closing(self.connect()) as conn, conn:
             try:
                 cursor = conn.execute(
                     f'DELETE FROM "{name}" WHERE {where}',

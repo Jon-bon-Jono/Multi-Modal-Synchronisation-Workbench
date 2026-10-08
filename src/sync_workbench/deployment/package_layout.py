@@ -74,6 +74,18 @@ def verify_package(root, *, full=True):
                       "artifact_root": "assets/artifacts", "rgb_root": "assets/rgb"}
     if config.get("paths") != expected_paths:
         raise ValueError("Unsupported student package paths")
+    calibration = config.get("spatial_calibration")
+    if calibration != manifest.get("spatial_calibration"):
+        raise ValueError("Configuration/manifest spatial calibration mismatch")
+    if calibration is not None:
+        if not isinstance(calibration, dict) or set(calibration) != {"path", "sha256"}:
+            raise ValueError("Invalid packaged spatial calibration reference")
+        local_path(root, calibration["path"])
+        entry = next((f for f in manifest["files"] if f["path"] == calibration["path"]), None)
+        if entry is None or entry["role"] != "calibration" or entry["sha256"] != calibration["sha256"]:
+            raise ValueError("Spatial calibration omitted from verified calibration inventory")
+        if manifest["assignment"]["target_device_type"] != "radar_raw":
+            raise ValueError("Spatial calibration requires an offline radar_raw assignment")
     for ref in config["paths"].values():
         local_path(root, ref)
     for asset in manifest["assets"]:

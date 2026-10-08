@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 
 from sync_workbench.core.time_utils import utc_now_str
+from sync_workbench.core.geometry import load_spatial_calibration, geometry_metadata
 from sync_workbench.experimental.anchoring_gui.session_selection import resolve_session
 from sync_workbench.services.anchor_service import AnchorEndpoint, AnchorService
 from sync_workbench.services.asset_service import AssetService
@@ -40,6 +41,7 @@ class AnchoringController:
         point_cloud_version_id: str | None = None,
         pose_predictions_path: str | Path | None = None,
         pose_prediction_array: str = "pred_globally_aligned",
+        spatial_calibration_path: str | Path | None = None,
     ):
         self.sqlite_path = Path(sqlite_path)
         self.subject_id = subject_id
@@ -52,6 +54,9 @@ class AnchoringController:
         self.store = SQLiteCoreStore(sqlite_path)
         self.lookup = MappingLookupService(sqlite_path)
         self._selection = resolve_session(sqlite_path, artifact_root, subject_id, mapping_version_id, point_cloud_version_id)
+        self.spatial_calibration = load_spatial_calibration(spatial_calibration_path)
+        if self.spatial_calibration is not None and self._selection.target_device_type != "radar_raw":
+            raise ValueError("Spatial calibration requires an offline radar_raw session")
         self.context = MappingProxyType(self.lookup.get_mapping_context(subject_id, mapping_version_id))
         self.session_id = str(uuid.uuid4())
         self.session_started_at = utc_now_str()
@@ -89,6 +94,7 @@ class AnchoringController:
         return {"created_by": "experimental_anchoring_gui", "initial_mapping_version_id": self.mapping_version_id,
                 "annotator_id": self.annotator_id, "session_id": self.session_id, "session_started_at": self.session_started_at,
                 "point_cloud": self.selection.cloud_provenance(),
+                "geometry": geometry_metadata(self.spatial_calibration),
                 **({"package": json.loads(json.dumps(self._package_provenance))} if self._package_provenance else {})}
 
     def initial_samples(self):

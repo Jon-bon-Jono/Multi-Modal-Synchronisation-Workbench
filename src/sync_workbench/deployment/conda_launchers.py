@@ -194,6 +194,11 @@ Windows: run setup_windows.cmd, then launch_windows.cmd.
 macOS: in Terminal, cd into this folder and run bash setup_macos.command,
 then bash launch_macos.command.
 
+If config.json includes spatial_calibration, launch automatically uses that
+bundled Kinect/raw-radar calibration. No calibration argument or student file
+selection is needed. Details shows its filename and checksum. Do not edit the
+bundled calibration/configuration; request a revised package from the coordinator.
+
 Setup finds Conda, reuses an existing SyncWB Python 3.11 environment or creates one,
 installs only missing/incompatible dependencies, then verifies the package. Each step is announced and Conda/pip output is visible.
 Setup can be rerun after a failure. Follow any Conda channel/account messages shown.

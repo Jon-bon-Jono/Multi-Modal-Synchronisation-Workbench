@@ -24,9 +24,7 @@ class IngestionService:
         reports_dir: str | Path | None = None,
     ) -> TransformResult:
         if Path(sqlite_path).exists():
-            versions = SQLiteCoreStore(sqlite_path).read_table("POINT_CLOUD_VERSION")
-            if not versions.empty and versions.device_type.eq("radar_raw").any():
-                raise ValueError("Legacy ingestion cannot reset acquisitions with registered raw cloud versions")
+            raise FileExistsError("ingest-temp requires a NEW database; use import-package for additive ingestion")
         package = TempPackage.read(input_dir)
         input_issues = validate_temp_inputs(
             package.device_runs,

@@ -3,8 +3,8 @@ setlocal
 rem Edit this preset to select another Kinect/raw-radar calibration.
 set "SYNCWB_SPATIAL_CALIBRATION=%~dp0..\..\calibration\kinect_radar\2026-10-06-desk\desk_all.json"
 call "%~dp0run_source_gui.cmd" ^
-  --subject 19_MM ^
+  --subject 09_SY ^
   --mapping-version initial_rgb_to_raw_v001 ^
-  --point-cloud-version raw_d3f274e06a775b757e89dc86f8f57dfb12ab4a198e66912af21dd176d39620f3 ^
+  --point-cloud-version raw_fbf432d2908ce574ec3daa437ab78762c7ed850bac3aeb6e7cb8b1aef9aeae7c ^
   --annotator-id JW01 %*
 exit /b %ERRORLEVEL%

@@ -617,3 +617,7 @@ preserves multi-person pose ordering, counts, confidence and relative timestamps
 Use `--dry-run` for metadata preflight. See [the export contract and prepared
 19_MM instructions](training_export.md). Source databases, artifacts and explicitly
 protected recording roots remain read-only.
+
+For calibrated spatial alignment, append `--spatial-calibration PATH` to both
+`anchoring-gui` and `export-training-data`. See [Kinect/raw-radar calibration](spatial_calibration.md)
+for the prepared 19_MM command, supported JSON format and transform provenance.

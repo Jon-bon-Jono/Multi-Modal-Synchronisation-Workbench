@@ -44,6 +44,15 @@ class ArtifactBuildService:
         devices: list[str] | None = None,
     ) -> ArtifactBuildResult:
         package = TempPackage.read(input_temp)
+        return self.build_from_package(package, sqlite_path, artifact_root,
+                                       subject_id=subject_id, devices=devices, overwrite=overwrite)
+
+    def build_from_package(
+        self, package: TempPackage, sqlite_path: str | Path, artifact_root: str | Path,
+        *, subject_id: str | None = None, devices: list[str] | None = None,
+        overwrite: bool = False,
+    ) -> ArtifactBuildResult:
+        """Build an already validated in-memory package (also used in isolated import staging)."""
         store = SQLiteCoreStore(sqlite_path)
         migrate_point_cloud_versions(sqlite_path)
         artifact_store = ArtifactStore(artifact_root)
@@ -196,10 +205,11 @@ class ArtifactBuildService:
             path = artifact_store.path_for_ref(ref)
             _guard_overwrite(path, overwrite)
             infos = IndexedJsonlWriter.write(path, [(int(r.sample_index), r.activity) for r in group.itertuples(index=False)])
+            activity_by_index = dict(zip(group.sample_index.astype(int), group.activity))
             aid = asset_id(subject_id, run_id, device_type, "activity_jsonl")
             run_assets.append(self._run_asset_row(aid, subject_id, run_id, device_type, "activity_jsonl", ref, "activity per-sample JSONL bundle"))
             for info in infos:
-                payload = group.loc[group["sample_index"].astype(int) == info.sample_index, "activity"].iloc[0]
+                payload = activity_by_index[info.sample_index]
                 row = self._sample_artifact_row(
                     subject_id,
                     run_id,

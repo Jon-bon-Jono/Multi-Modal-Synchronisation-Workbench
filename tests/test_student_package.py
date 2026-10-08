@@ -264,3 +264,78 @@ def test_check_flags_reach_gui_launch_preparation(monkeypatch):
     assert student_runtime.main(['--package','unused','--annotator-id','student01',
                                  '--full-checksums','--sqlite-integrity-check'])==0
     assert seen==[dict(full_checksums=True,sqlite_integrity_check=True)]
+
+
+@pytest.fixture
+def calibrated_inputs(inputs, tmp_path):
+    """Reuse the tiny captured stream as a synthetic raw assignment."""
+    from sync_workbench.core.tables import TABLE_SPECS
+    from test_spatial_calibration import write_calibration
+    with sqlite3.connect(inputs['sqlite_path']) as conn:
+        for table, spec in TABLE_SPECS.items():
+            if 'device_type' in spec.columns:
+                conn.execute(f'DELETE FROM "{table}" WHERE device_type=?', ('radar_raw',))
+                conn.execute(f'UPDATE "{table}" SET device_type=? WHERE device_type=?', ('radar_raw','radar_pc'))
+            if 'target_device_type' in spec.columns:
+                conn.execute(f'UPDATE "{table}" SET target_device_type=? WHERE target_device_type=?', ('radar_raw','radar_pc'))
+            if 'point_cloud_version_id' in spec.columns:
+                conn.execute(f'UPDATE "{table}" SET point_cloud_version_id=? WHERE point_cloud_version_id=?', ('raw_synthetic','online_original'))
+        conn.execute('UPDATE POINT_CLOUD_VERSION SET provenance_json=?',
+                     (json.dumps({'version': {'tracking_enabled': True, 'point_cloud_version_id': 'raw_synthetic'}}),))
+    return dict(inputs, point_cloud_version_id='raw_synthetic', spatial_calibration_path=write_calibration(tmp_path))
+
+
+def test_packaged_calibration_survives_relocation_and_reaches_gui(calibrated_inputs, tmp_path):
+    from sync_workbench.experimental.anchoring_gui.controllers import AnchoringController
+    args = calibrated_inputs
+    export_student_package(**args)
+    root = tmp_path/'relocated calibrated package'
+    args['output'].rename(root)
+    original = sha256(args['spatial_calibration_path'])
+    args['spatial_calibration_path'].unlink()
+    options = prepare_student_launch(root, 'student01')
+    assert options['spatial_calibration_path'].is_relative_to(root)
+    assert sha256(options['spatial_calibration_path']) == original
+    assert read_manifest(root)['spatial_calibration']['sha256'] == original
+    controller = AnchoringController(**options)
+    try:
+        controller.get_rgb_frame = lambda sample: np.zeros((72,128,3),np.uint8)
+        controller.place_anchor(0, 0)
+        exported = controller.export_anchors(tmp_path/'return.json')
+        assert exported['session']['geometry']['spatial_calibration']['sha256'] == original
+        assert json.loads(exported['ANCHOR'][0]['notes'])['provenance']['geometry'] == exported['session']['geometry']
+    finally:
+        controller.close()
+
+
+def test_calibration_checked_on_normal_launch_before_creating_work(calibrated_inputs):
+    export_student_package(**calibrated_inputs)
+    root = calibrated_inputs['output']
+    ref = read_manifest(root)['spatial_calibration']['path']
+    path = root/ref
+    path.write_bytes(path.read_bytes().replace(b'synthetic', b'Synthetic'))
+    with pytest.raises(ValueError, match='checksum mismatch'):
+        prepare_student_launch(root, 'student01')
+    assert not (root/'work').exists()
+
+
+def test_online_student_assignment_rejects_raw_calibration(inputs, tmp_path):
+    from test_spatial_calibration import write_calibration
+    with pytest.raises(ValueError, match='radar_raw'):
+        export_student_package(**inputs, spatial_calibration_path=write_calibration(tmp_path))
+    assert not inputs['output'].exists()
+
+
+def test_package_cli_forwards_calibration(monkeypatch):
+    from sync_workbench.cli.main import main
+    from sync_workbench.deployment import student_package
+    received = {}
+    def export(**options):
+        received.update(options)
+        return {}
+    monkeypatch.setattr(student_package, 'export_student_package', export)
+    assert main(['export-student-package', '--sqlite', 'db', '--artifact-root', 'artifacts',
+                 '--rgb-root', 'rgb', '--output', 'package', '--subject', 'S',
+                 '--mapping-version', 'initial', '--point-cloud-version', 'raw_test',
+                 '--spatial-calibration', 'desk.json']) == 0
+    assert received['spatial_calibration_path'] == 'desk.json'

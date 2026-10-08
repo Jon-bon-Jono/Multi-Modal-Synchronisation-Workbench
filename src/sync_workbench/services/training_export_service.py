@@ -17,17 +17,22 @@ import numpy as np
 import pandas as pd
 
 from sync_workbench.core.geometry import (
-    GEOMETRY_PROFILE_ID, KINECT_JOINT_NAMES, SENSOR_HEIGHT_M,
-    SENSOR_PITCH_DOWN_DEG, points_sensor_to_world, pose3d_to_world,
-    sensor_to_world_rotation_matrix,
+    KINECT_JOINT_NAMES, points_sensor_to_world, pose3d_to_world,
+    geometry_metadata, load_spatial_calibration,
 )
 from sync_workbench.core.time_utils import utc_now_str
 from sync_workbench.ingestion.raw_point_cloud_package import file_hash, json_hash
 from sync_workbench.storage.ragged_npz import RaggedNpzReader
 from sync_workbench.sync.mapping import timeline_numeric_values
 
-SCHEMA = "syncwb.training_export.v1"
+SCHEMA = "syncwb.training_export.v3"
 RUN = "subject_id=? AND run_id=? AND device_type=?"
+POSE2D_JOINT_NAMES = [
+    "Nose", "L_Eye", "R_Eye", "L_Ear", "R_Ear", "L_Shoulder", "R_Shoulder",
+    "L_Elbow", "R_Elbow", "L_Wrist", "R_Wrist", "L_Hip", "R_Hip", "L_Knee",
+    "R_Knee", "L_Ankle", "R_Ankle", "Head_Apex", "Neck", "Hip_Center",
+    "L_BigToe", "R_BigToe", "L_SmallToe", "R_SmallToe", "L_Heel", "R_Heel",
+]
 
 
 def _rows(conn, table, where, args):
@@ -82,6 +87,26 @@ def processing_recipe(manifest):
     if manifest["point_columns"] != ["x", "y", "z", "radial_velocity", "snr", "association_id"]:
         raise ValueError("Unsupported raw point columns")
     return recipe
+
+
+def processing_compatibility(manifest):
+    """v2: calibration input frames may vary across acquisitions; the method must match.
+
+    Exact v1 recipes remain in per-result export provenance. For legacy generators
+    without an explicit calibration procedure record, config + executable + native
+    profile bind the implementation under the declared per-acquisition-input policy.
+    This is not a claim that different calibration results are numerically equal.
+    """
+    profile = processing_recipe(manifest).copy()
+    hashes = profile.pop("calibration_sha256")
+    profile["schema"] = "syncwb.processing_compatibility.v2"
+    metadata = manifest["generator_metadata"]
+    profile["calibration_input_policy"] = "per_acquisition" if hashes else "none"
+    profile["calibration_frame_count"] = len(hashes)
+    profile["calibration_procedure"] = metadata.get("calibration_procedure", {
+        "identity_basis": "legacy_executable_config_and_native_profile",
+    })
+    return profile
 
 
 def _timeline(conn, key, timeline_id):
@@ -140,20 +165,6 @@ def _ranges(indices):
     return [[int(g[0]), int(g[-1])] for g in groups]
 
 
-def _geometry():
-    rotation = sensor_to_world_rotation_matrix()
-    axis = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=float)
-    return dict(profile_id=GEOMETRY_PROFILE_ID, coordinate_frame="approximate_floor_world",
-                units="m", axes=["right", "forward", "up"], handedness="right",
-                sensor_pitch_down_deg=SENSOR_PITCH_DOWN_DEG, sensor_height_m=SENSOR_HEIGHT_M,
-                radar_rotation=rotation.tolist(), translation_m=[0, 0, SENSOR_HEIGHT_M],
-                kinect_mm_to_sensor_m=(axis * 0.001).tolist(),
-                kinect_mm_to_world_linear=(rotation @ axis * 0.001).tolist(),
-                convention="column vectors: world = linear @ input + translation",
-                calibration_status="historical GUI assumption; no calibrated Kinect-radar extrinsics",
-                point_filter="none", temporal_accumulation="none")
-
-
 def _prepare(conn, selections, gap_factor):
     segments, contexts, recipes, profiles = [], [], [], []
     selected_clouds, pairs = {}, set()
@@ -183,7 +194,7 @@ def _prepare(conn, selections, gap_factor):
         binding = {k: manifest[k] for k in ("hdf5_sha256", "subject_id", "run_id", "device_type", "source_frame_number_base")}
         if vid != "raw_" + json_hash(binding) or (binding["subject_id"], binding["run_id"], binding["device_type"]) != rk:
             raise ValueError("Cloud result binding disagrees with acquisition")
-        recipes.append(processing_recipe(manifest))
+        recipes.append(processing_compatibility(manifest))
         if not re.fullmatch(r"[0-9a-f]{64}", str(cloud.get("artifact_sha256", ""))):
             raise ValueError("Selected raw cloud requires a valid bundle checksum")
         model = _one(_rows(conn, "SYNC_MODEL", "subject_id=? AND sync_model_id=?",
@@ -257,7 +268,7 @@ def _prepare(conn, selections, gap_factor):
         segments.append(segment)
         context["segments"].append(sid)
     if len({json_hash(r) for r in recipes}) != 1:
-        raise ValueError("Mixed processing recipes: settings, generator or calibration differ")
+        raise ValueError("Mixed processing compatibility profiles: settings, generator or calibration procedure differ")
     if len({json_hash(p) for p in profiles}) != 1:
         raise ValueError("Mixed mapping profiles/methods are not allowed")
     # Subject selection is complete for raw acquisitions; no implicit skipped run.
@@ -324,7 +335,7 @@ def _bundle(conn, root, key, role, version, cache):
     return by_index, readers
 
 
-def _write_segment(conn, root, folder, segment, recipe_id, profile_id, geometry, hashes):
+def _write_segment(conn, root, folder, segment, compatibility_id, profile_id, geometry, hashes, calibration=None):
     import h5py
 
     c = segment["context"]
@@ -337,9 +348,11 @@ def _write_segment(conn, root, folder, segment, recipe_id, profile_id, geometry,
     radar_blocks = np.searchsorted(boundaries, radar_time, side="right")
     pose_blocks = np.searchsorted(boundaries, pose_time, side="right")
     nearest[radar_blocks != pose_blocks[nearest.clip(0)]] = -1
+    exact_recipe = processing_recipe(json.loads(c["cloud"]["provenance_json"])["version"])
     common = dict(schema=SCHEMA, segment_id=sid, subject_id=c["radar_key"][0],
                   radar_run_id=c["radar_key"][1], pose_run_id=c["pose_key"][1],
-                  processing_recipe_id=recipe_id, mapping_profile_id=profile_id,
+                  processing_recipe_id="recipe_" + json_hash(exact_recipe),
+                  processing_compatibility_id=compatibility_id, mapping_profile_id=profile_id,
                   point_cloud_version_id=c["selection"]["point_cloud_version_id"],
                   mapping_version_id=c["mapping"]["mapping_version_id"],
                   aligned_origin=segment["origin"], time_coordinate_kind=rt["kind"],
@@ -437,19 +450,137 @@ def _write_segment(conn, root, folder, segment, recipe_id, profile_id, geometry,
                         raise ValueError("Nonfinite raw points")
                     values[dest] = points_sensor_to_world(arr)
                 else:
-                    xyz = pose3d_to_world(arr)
+                    xyz = pose3d_to_world(arr, calibration=calibration)
                     values[dest] = xyz
                     confidence[dest] = arr[..., 3]
                     valid[dest] = np.isfinite(xyz).all(axis=-1)
+            if modality == "pose":
+                _write_pose_extras(conn, root, key, ids, summary, h, hashes)
         result["files"][modality] = {"path": filename, "sha256": file_hash(folder / filename)}
         result[f"{modality}_missing_payload_frames"] = int(np.count_nonzero(~np.asarray(available)))
         del readers
     return result
 
 
+def _write_pose_extras(conn, root, key, ids, summary, h, hashes):
+    """Preserve independent 2D detections, activity labels and RGB PTS per frame."""
+    import h5py
+    from contextlib import ExitStack
+
+    metadata, readers = _bundle(conn, root, key, "pose2d", "", hashes)
+    conf_meta, conf_readers = _bundle(conn, root, key, "conf2d", "", hashes)
+
+    def payload(index, meta, bundles):
+        row = meta.get(int(index))
+        return bundles[row["artifact_ref"]].get(int(index)) if row else None
+
+    lengths, available, conf_available = [], [], []
+    for idx in ids:
+        arr, conf = payload(idx, metadata, readers), payload(idx, conf_meta, conf_readers)
+        if arr is not None and arr.shape[1:] != (26, 3):
+            raise ValueError("Unexpected 2D pose payload shape; expected people x 26 x 3")
+        n = len(arr) if arr is not None else 0
+        if conf is not None and (arr is None or conf.shape != (n,)):
+            raise ValueError("2D bounding-box scores do not match 2D detections")
+        lengths.append(n)
+        available.append(arr is not None)
+        conf_available.append(conf is not None)
+    frames, poses = h["frames"], h.create_group("poses2d")
+    poses.attrs["joint_names_json"] = json.dumps(POSE2D_JOINT_NAMES)
+    poses.attrs["schema"] = "Body8-Halpe26"
+    poses.attrs["coordinate_frame"] = "source 2D prediction image pixels; no resize or projection applied"
+    poses.attrs["image_size_status"] = "not recorded in canonical pose artifacts; do not infer from preview video or factory sensor dimensions"
+    poses.attrs["person_correspondence"] = "2D ordering is independent of 3D ordering; no identity association"
+    offsets = np.concatenate(([0], np.cumsum(lengths, dtype=np.int64)))
+    _dataset(poses, "offsets", offsets)
+    total = int(offsets[-1])
+    arrays = {name: poses.create_dataset(name, shape=shape, dtype=dtype,
+               **({"compression": "gzip", "shuffle": True} if total else {}))
+              for name, shape, dtype in (
+                  ("xy", (total, 26, 2), "float64"),
+                  ("confidence", (total, 26), "float64"),
+                  ("bbox_confidence", (total,), "float64"),
+                  ("finite_xy", (total, 26), "bool"))}
+    for start in range(0, len(ids), 256):
+        stop = min(start + 256, len(ids))
+        if offsets[start] == offsets[stop]:
+            continue
+        chunks, scores = [], []
+        for idx in ids[start:stop]:
+            arr = payload(idx, metadata, readers)
+            if arr is None:
+                continue
+            chunks.append(arr)
+            conf = payload(idx, conf_meta, conf_readers)
+            scores.append(np.full(len(arr), np.nan) if conf is None else conf)
+        arr = np.concatenate(chunks)
+        dest = slice(int(offsets[start]), int(offsets[stop]))
+        arrays["xy"][dest] = arr[..., :2]
+        arrays["confidence"][dest] = arr[..., 2]
+        arrays["bbox_confidence"][dest] = np.concatenate(scores)
+        arrays["finite_xy"][dest] = np.isfinite(arr[..., :2]).all(axis=-1)
+    for name, values in (("pose2d_payload_available", available), ("conf2d_payload_available", conf_available)):
+        _dataset(frames, name, np.asarray(values, dtype=np.bool_))
+    _dataset(frames, "pose2d_person_count", np.asarray(lengths, dtype=np.int64))
+    for name in ("num_2d", "num_3d"):
+        _dataset(frames, name, np.asarray([
+            -1 if summary.get(int(idx), {}).get(name) is None else int(summary[int(idx)][name])
+            for idx in ids], dtype=np.int64))
+    pts = _rows(conn, "SAMPLE_TIME_ESTIMATE", RUN + " AND timeline_model_id=?", (*key, "rgb_pts_elapsed"))
+    if len({int(r["sample_index"]) for r in pts}) != len(pts):
+        raise ValueError("Duplicate RGB PTS rows")
+    pts = {int(r["sample_index"]): r["time_value_sec"] for r in pts}
+    _dataset(frames, "rgb_pts_s", np.asarray([
+        np.nan if pts.get(int(idx)) is None else float(pts[int(idx)]) for idx in ids], dtype=np.float64))
+    rows = _rows(conn, "SAMPLE_ARTIFACT", RUN + " AND artifact_role='activity' AND point_cloud_version_id=''", key)
+    activity = {int(r["sample_index"]): r for r in rows}
+    if len(activity) != len(rows):
+        raise ValueError("Duplicate activity artifacts")
+    labels = frames.create_dataset("activity_json", shape=(len(ids),), dtype=h5py.string_dtype("utf-8"))
+    _dataset(frames, "activity_payload_available", np.asarray([int(idx) in activity for idx in ids], dtype=np.bool_))
+    with ExitStack() as stack:
+        files = {}
+        for pos, idx in enumerate(ids):
+            row = activity.get(int(idx))
+            value = None
+            if row:
+                if row["artifact_format"] != "jsonl" or row["storage_key"] != "artifact_store":
+                    raise ValueError("Unsupported activity artifact")
+                ref = row["artifact_ref"]
+                if ref not in files:
+                    path = _path(root, ref)
+                    hashes.setdefault(path, file_hash(path))
+                    files[ref] = stack.enter_context(path.open("rb"))
+                member = json.loads(row["artifact_member_key"])
+                files[ref].seek(int(member["byte_offset"]))
+                record = json.loads(files[ref].read(int(member["nbytes"])))
+                if record["sample_index"] != int(idx):
+                    raise ValueError("Activity artifact index mismatch")
+                value = record["payload"]
+            labels[pos] = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def _kinect_metadata(conn, key, kinect_root):
+    result = dict(video_assets=_rows(conn, "RUN_ASSET", RUN + " AND asset_role IN ('rgb_video','rgb_video_integrity')", key),
+                  video_included=False, camera_calibration=None)
+    if kinect_root is not None:
+        root = Path(kinect_root).resolve()
+        path = _path(root, f"{key[0]}/{key[1]}/kinect_camera_recording_calibration.json")
+        raw = path.read_bytes()
+        import hashlib
+        document = json.loads(raw)
+        if not isinstance(document, dict) or not document.get("CalibrationInformation", {}).get("Cameras"):
+            raise ValueError(f"Expected Kinect recording calibration: {path}")
+        result["camera_calibration"] = dict(source_ref=path.relative_to(root).as_posix(),
+            sha256=hashlib.sha256(raw).hexdigest(), document=document,
+            interpretation="verbatim factory calibration; capture mode and prediction-image scaling must be resolved before pixel projection")
+    return result
+
+
 def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
                          subjects=None, mapping_version_id=None, point_cloud_version_id=None,
-                         point_cloud_label=None, read_only_roots=(), gap_factor=3.0, dry_run=False):
+                         point_cloud_label=None, read_only_roots=(), gap_factor=3.0, dry_run=False,
+                         spatial_calibration_path=None, kinect_root=None):
     """Export explicit pair selections, or resolve one mapping/cloud per subject.
 
     dry_run validates selection, recipes, timeline coverage and output safety;
@@ -458,7 +589,12 @@ def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
     source, root, output = Path(sqlite_path).resolve(), Path(artifact_root).resolve(), Path(output).resolve()
     if not source.is_file() or not root.is_dir():
         raise ValueError("Source database and artifact root must exist")
+    calibration = load_spatial_calibration(spatial_calibration_path)
     protected = [source, root, *(Path(p).resolve() for p in read_only_roots)]
+    if kinect_root is not None:
+        protected.append(Path(kinect_root).resolve())
+    if spatial_calibration_path is not None:
+        protected.append(Path(spatial_calibration_path).resolve())
     if any(output.is_relative_to(p) or p.is_relative_to(output) for p in protected):
         raise ValueError("Output overlaps an input or read-only root")
     if output.exists():
@@ -489,12 +625,16 @@ def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
                                        point_cloud_version_id=v["point_cloud_version_id"]))
         selections = sorted(selections, key=lambda s: (s["subject_id"], s["mapping_version_id"], s["point_cloud_version_id"]))
         segments, contexts, recipe, profile = _prepare(conn, selections, gap_factor)
-        recipe_id, profile_id = "recipe_" + json_hash(recipe), "mapping_profile_" + json_hash(profile)
-        geometry = _geometry()
+        compatibility_id, profile_id = "processing_compatibility_" + json_hash(recipe), "mapping_profile_" + json_hash(profile)
+        geometry = geometry_metadata(calibration)
         bindings, coverage = [], []
         for c in contexts:
+            exact_recipe = processing_recipe(json.loads(c["cloud"]["provenance_json"])["version"])
             bindings.append(dict(selection=c["selection"], mapping=c["mapping"], sync_model=c["sync_model"],
                                  cloud=c["cloud"], model_anchors=c["anchors"],
+                                 exact_processing_recipe_id="recipe_" + json_hash(exact_recipe),
+                                 exact_processing_recipe=exact_recipe,
+                                 kinect=_kinect_metadata(conn, c["pose_key"], kinect_root),
                                  timelines={kind: {"model": c[kind]["model"], "fingerprint": c[kind]["fingerprint"]}
                                             for kind in ("radar_timeline", "pose_timeline")}))
             for kind in ("radar", "pose"):
@@ -520,17 +660,18 @@ def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
                                          exported_frames=0, excluded_sample_ranges=_ranges(ids),
                                          reason="no initial-timeline overlap with selected raw acquisitions"))
         manifest = dict(schema=SCHEMA, subjects=sorted({s["subject_id"] for s in selections}),
-                        processing_recipe_id=recipe_id, processing_recipe=recipe,
+                        processing_compatibility_id=compatibility_id, processing_compatibility=recipe,
                         mapping_profile_id=profile_id, mapping_profile=profile,
                         synchronization_release_id=release, geometry=geometry, selections=bindings,
-                        coverage=coverage, scope="supported overlapping segments; 3D Kinect poses and offline raw clouds",
+                        coverage=coverage, scope="supported overlapping segments; 2D/3D poses, activity metadata and offline raw clouds",
                         timestamp_policy="run-local timeline_time_s; common segment-local aligned_time_s in radar timeline; datetime origins are UTC-like naive coordinates, not verified UTC",
                         missing_policy="unprocessed/missing payloads retained; unavailable counts and references = -1",
-                        person_policy="original per-frame ordering; no identity tracking or single-person filtering")
+                        person_policy="original per-frame ordering; no identity tracking or single-person filtering; independent 2D/3D person order",
+                        pose2d_policy="as imported from ETL, including upstream filtering; source-image pixels and detector scores, not projections of Kinect 3D joints")
         if dry_run:
             return dict(dry_run=True, segment_count=len(segments), payload_file_count=2 * len(segments),
-                        processing_recipe_id=recipe_id, mapping_profile_id=profile_id,
-                        selections=selections, coverage=coverage)
+                        processing_compatibility_id=compatibility_id, mapping_profile_id=profile_id,
+                        selections=selections, coverage=coverage, geometry=geometry)
         try:
             import h5py  # noqa: F401
         except ImportError as exc:
@@ -539,7 +680,7 @@ def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
         with TemporaryDirectory(prefix=".syncwb-training-", dir=output.parent) as temp:
             staging = Path(temp)
             hashes = {}
-            manifest["segments"] = [_write_segment(conn, root, staging, s, recipe_id, profile_id, geometry, hashes) for s in segments]
+            manifest["segments"] = [_write_segment(conn, root, staging, s, compatibility_id, profile_id, geometry, hashes, calibration) for s in segments]
             # Detect changes during export instead of publishing inconsistent payloads.
             for path, digest in hashes.items():
                 if file_hash(path) != digest:
@@ -551,9 +692,13 @@ def export_training_data(*, sqlite_path, artifact_root, output, selections=None,
             manifest["created_at"] = utc_now_str()
             (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
             (staging / "README.txt").write_text(
-                "SyncWB training export v1. manifest.json is the completion marker.\n"
+                "SyncWB training export v3. manifest.json is the completion marker.\n"
                 "Each segment has independent radar/pose HDF5 files; windows must stay within segment_id + frames/sequence_block.\n"
-                "Both use approximate GUI world geometry in metres; do not transform again.\n"
+                "Radar XYZ and 3D poses use the manifest geometry in world metres; do not transform again.\n"
+                "poses2d contains independent Body8-Halpe26 detections in source-image pixels, joint scores and bbox scores.\n"
+                "2D image size/scaling is not recorded in canonical artifacts. Factory calibration alone does not resolve it.\n"
+                "frames includes original num_people/num_2d/num_3d, actual payload counts, activity JSON and RGB PTS.\n"
+                "manifest selections/kinect embeds recording calibration and external video references when supplied; videos are not copied.\n"
                 "Ragged values use offsets[i]:offsets[i+1]. Pose ordering is not track identity.\n"
                 "Radar correspondence/pose_row references its paired pose file, with -1 for no match.\n"
                 "Use frames/aligned_time_s for cross-modal relative times; preserve missing-frame gaps.\n"

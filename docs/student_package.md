@@ -27,6 +27,16 @@ No symlinks to recordings, master paths or environment activation paths are used
 to locate package data. Historical provenance may retain original paths as text;
 they are not operational asset references.
 
+For an offline raw-radar assignment, add
+`--spatial-calibration calibration/kinect_radar/2026-10-06-desk/desk_all.json`
+to the **package-generation** command. The exporter validates and copies the
+JSON into the package and binds its relative path/hash in config and manifest.
+Windows and macOS student launch scripts then apply it automatically; students
+do not pass a calibration argument. The calibration is checked on every launch,
+including lightweight verification, and appears in GUI/anchor geometry provenance.
+Packages without this optional setting preserve their previous geometry. Online
+assignments reject raw-radar calibration. See [spatial calibration](spatial_calibration.md).
+
 One export assigns one subject, one RGB/radar pair, one navigation mapping and
 one cloud version. Export additional assignments as separate packages. The
 exporter copies full acquisition runs (including unprocessed raw frames), all
@@ -49,6 +59,7 @@ config.json                    immutable assignment and relative operational pat
 database/template.sqlite       clean immutable local-database seed
 assets/artifacts/<hash>.*       assigned cloud and source pose/activity bundles
 assets/rgb/<hash>.mp4           copied RGB video
+calibration/kinect_radar/*.json optional immutable Kinect/raw-radar calibration
 application/                   exact SyncWB Python source snapshot and build metadata
 requirements.txt               dependency bounds for Python 3.11
 setup_windows.cmd / launch_windows.cmd
@@ -188,3 +199,13 @@ new/unchanged counts. Identical anchor IDs/content are no-ops; differing content
 rejects the entire batch. See [anchor returns and recovery](anchor_returns.md)
 for exact behavior and recovery commands. WP1-only packages must be regenerated
 to include the WP2 runtime and acquisition digest; do not edit a manifest in place.
+
+The 7 October 2026 calibrated revision of
+`deployment_data/packages/student_d9c3400a0c1a4fe0891d89c1b5b31029` retains the
+assignment/package ID but has a new manifest digest and runtime snapshot. Its
+previous ZIP, manifest, checksum and guides are retained in `previous_revisions/`.
+Use the manifest matching each student's return, including the archived manifest
+for work made with the previous release. Extract the updated ZIP into a fresh
+folder and keep existing `work` folders intact; do not copy an old working
+database into the revision. The package's `CALIBRATION_UPDATE.md` records the
+revision and chosen calibration.

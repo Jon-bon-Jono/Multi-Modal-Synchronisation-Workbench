@@ -85,6 +85,9 @@ def verify_student_runtime(root, *, full_checksums=False, sqlite_integrity_check
     result = verify_package(root, full=full_checksums)
     manifest = read_manifest(root)
     _verify_runtime(root, manifest)
+    if manifest.get("spatial_calibration") is not None:
+        from sync_workbench.core.geometry import load_spatial_calibration
+        load_spatial_calibration(local_path(root, manifest["spatial_calibration"]["path"]))
     checked = []
     for ref, working in (("database/template.sqlite", False), ("work/workbench.sqlite", True)):
         db = local_path(root, ref)
@@ -129,6 +132,8 @@ def prepare_student_launch(root, annotator_id, *, full_checksums=False, sqlite_i
             "rgb_root": local_path(root, config["paths"]["rgb_root"]), "subject_id": assignment["subject_id"],
             "mapping_version_id": assignment["mapping_version_id"], "point_cloud_version_id": assignment["point_cloud_version_id"],
             "annotator_id": annotator_id,
+            "spatial_calibration_path": (local_path(root, config["spatial_calibration"]["path"])
+                                         if config.get("spatial_calibration") is not None else None),
             "package_provenance": {"schema": manifest["schema"], "package_id": manifest["package_id"],
                                    "manifest_sha256": manifest["manifest_sha256"], "template_sha256": template_sha,
                                    "runtime_id": manifest["runtime_id"], "assignment": assignment}}

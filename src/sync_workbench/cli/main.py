@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     raw_clouds.add_argument("--input", required=True)
     raw_clouds.add_argument("--sqlite", required=True, help="Migrated database")
     raw_clouds.add_argument("--artifact-root", required=True)
+    package_import = sub.add_parser("import-package", help="Add Kinect runs and immutable offline clouds; verify repeats and reject conflicts")
+    package_import.add_argument("--input", required=True)
+    package_import.add_argument("--sqlite", required=True, help="Existing migrated canonical database")
+    package_import.add_argument("--artifact-root", required=True)
+    package_import.add_argument("--rgb-root", help="Kinect video root; required when the package includes RGB samples")
+    package_import.add_argument("--dry-run", action="store_true", help="Validate using scratch files; leave the master and artifact store unchanged")
     versions = sub.add_parser("list-point-cloud-versions", help="List registered clouds for an acquisition")
     versions.add_argument("--sqlite", required=True)
     versions.add_argument("--subject", required=True)
@@ -48,10 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     student.add_argument("--point-cloud-version", required=True)
     student.add_argument("--application-root", default=None)
     student.add_argument("--read-only-root", action="append", default=[])
+    student.add_argument("--spatial-calibration", help="Bundle a desk-v2 JSON and apply it automatically on student launch")
     verify_student = sub.add_parser("verify-student-package", help="Verify immutable package files without opening the GUI")
     verify_student.add_argument("--package", required=True)
 
-    training = sub.add_parser("export-training-data", help="Export separate raw-cloud/3D-pose HDF5 files per overlapping segment")
+    training = sub.add_parser("export-training-data", help="Export raw-cloud and 2D/3D-pose HDF5 files per overlapping segment")
     training.add_argument("--sqlite", required=True)
     training.add_argument("--artifact-root", required=True)
     training.add_argument("--output", required=True, help="New directory outside input and protected roots")
@@ -64,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     training.add_argument("--read-only-root", action="append", default=[])
     training.add_argument("--gap-factor", type=float, default=3.0, help="Mark sequence boundaries at gaps greater than this many nominal periods; files remain per run pair")
     training.add_argument("--dry-run", action="store_true", help="Read-only selection/timeline preflight; does not load payload arrays or create output")
+    training.add_argument("--spatial-calibration", help="Desk-v2 JSON Kinect/raw-radar spatial calibration")
+    training.add_argument("--kinect-root", help="Embed each selected run's recording calibration JSON from this Kinect root; missing files are errors")
 
     ingest = sub.add_parser("ingest-temp", help="Convert temporary zst ingestion files into a canonical SQLite store")
     ingest.add_argument("--input", required=True, help="Folder containing device_runs.zst and available sample .zst files")
@@ -226,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--mapping-version", default=None, help="Preselect a mapping in the launch dialog")
     gui.add_argument("--point-cloud-version", default=None, help="Cloud version ID; together with --mapping-version selects the session without a dialog")
     gui.add_argument("--annotator-id", default="")
+    gui.add_argument("--spatial-calibration", help="Desk-v2 JSON Kinect/raw-radar spatial calibration, fixed for this session")
     gui.add_argument(
         "--pose-predictions",
         default=None,
@@ -258,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output, selections=selections, subjects=args.subjects,
             mapping_version_id=args.mapping_version, point_cloud_version_id=args.point_cloud_version,
             point_cloud_label=args.point_cloud_label, read_only_roots=args.read_only_root,
-            gap_factor=args.gap_factor, dry_run=args.dry_run)
+            gap_factor=args.gap_factor, dry_run=args.dry_run, spatial_calibration_path=args.spatial_calibration,
+            kinect_root=args.kinect_root)
         print(json.dumps(result, indent=2))
         return 0
 
@@ -267,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         result = export_student_package(sqlite_path=args.sqlite, artifact_root=args.artifact_root, rgb_root=args.rgb_root,
             output=args.output, subject_id=args.subject, mapping_version_id=args.mapping_version,
             point_cloud_version_id=args.point_cloud_version, application_root=args.application_root,
-            read_only_roots=args.read_only_root)
+            read_only_roots=args.read_only_root, spatial_calibration_path=args.spatial_calibration)
         print(json.dumps(result, indent=2))
         return 0
     if args.command == "verify-student-package":
@@ -279,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "import-raw-point-clouds":
         print(json.dumps(RawPointCloudImportService().import_package(args.input, args.sqlite, args.artifact_root), indent=2))
+        return 0
+    if args.command == "import-package":
+        from sync_workbench.services.package_import_service import PackageImportService
+        print(json.dumps(PackageImportService().import_package(
+            args.input, args.sqlite, args.artifact_root, rgb_root=args.rgb_root, dry_run=args.dry_run), indent=2))
         return 0
     if args.command == "list-point-cloud-versions":
         versions = PayloadService(args.sqlite, ".").list_point_cloud_versions(args.subject, args.run, args.device)
@@ -514,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
                 annotator_id=args.annotator_id,
                 pose_predictions_path=args.pose_predictions,
                 pose_prediction_array=args.pose_prediction_array,
+                spatial_calibration_path=args.spatial_calibration,
             )
         except (RuntimeError, FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}")

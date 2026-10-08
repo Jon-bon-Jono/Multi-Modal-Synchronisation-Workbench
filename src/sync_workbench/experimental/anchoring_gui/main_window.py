@@ -142,11 +142,14 @@ def make_main_window_class():
             self._session_details = (f"Cloud fixed for this session: {self.controller.selection.source_label} | "
                 f"{self.controller.selection.readable_label} | annotator: {self.controller.annotator_id or 'not specified'}"
                 f" | version: {self.controller.point_cloud_version_id} | package: {self.controller.package_id or 'standalone'}")
+            calibration = self.controller.spatial_calibration
+            self._session_details += (f" | spatial calibration: {calibration.source_name} ({calibration.sha256})"
+                                      if calibration else " | spatial calibration: legacy axis alignment")
             self.session_label = compact_label(f"{self.controller.subject_id} | {source_name}: {self.controller.selection.readable_label} | {self.controller.annotator_id or 'Annotator not specified'}")
             self.session_label.setToolTip(self._session_details)
             self.cloud_status = compact_label()
             self.video_panel = VideoPanel()
-            self.point_panel = PointCloudPanel()
+            self.point_panel = PointCloudPanel(calibration=self.controller.spatial_calibration)
             # The decoded image dimensions must not dictate the layout size.
             self.video_panel.setMinimumSize(240, 180)
             self.video_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
@@ -947,6 +950,7 @@ def make_main_window_class():
                 self._projected_pc_cache_value = project_pc_to_digital(
                     self._current_target_points(),
                     filter_noise=self.filter_noise_points,
+                    calibration=self.controller.spatial_calibration,
                 )
                 self._projected_pc_cache_key = key
 

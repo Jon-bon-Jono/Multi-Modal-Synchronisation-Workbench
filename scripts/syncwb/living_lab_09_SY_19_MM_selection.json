@@ -1,0 +1,12 @@
+[
+  {
+    "subject_id": "09_SY",
+    "mapping_version_id": "initial_rgb_to_raw_v001",
+    "point_cloud_version_id": "raw_fbf432d2908ce574ec3daa437ab78762c7ed850bac3aeb6e7cb8b1aef9aeae7c"
+  },
+  {
+    "subject_id": "19_MM",
+    "mapping_version_id": "initial_rgb_to_raw_v001",
+    "point_cloud_version_id": "raw_d3f274e06a775b757e89dc86f8f57dfb12ab4a198e66912af21dd176d39620f3"
+  }
+]

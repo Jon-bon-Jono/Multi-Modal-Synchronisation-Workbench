@@ -118,6 +118,91 @@ def test_dry_run_and_label_resolution(tmp_path):
     assert not args["output"].exists()
 
 
+def test_2d_activity_pts_camera_calibration_and_independent_people(tmp_path):
+    from sync_workbench.storage.jsonl_index import IndexedJsonlWriter
+
+    args = make_source(tmp_path)
+    root = args["artifact_root"]
+    poses = {0: np.empty((0, 26, 3)), 2: np.full((3, 26, 3), [100.125, 200.25, 0.75])}
+    poses[2][1, 4, 0] = np.nan
+    RaggedNpzWriter.write(root / "2d.npz", poses, tail_shape=(26, 3), dtype="float64")
+    RaggedNpzWriter.write(root / "conf.npz", {0: np.empty(0), 2: np.array([0.9, 0.8, 0.7])}, tail_shape=(), dtype="float64")
+    infos = IndexedJsonlWriter.write(root / "activity.jsonl", [(0, {}), (2, {"01-Activity": ["飲む", "drink"]})])
+    with sqlite3.connect(args["sqlite_path"]) as conn:
+        def add(table, **fields):
+            row = dict(subject_id="S", run_id="K1", device_type="kinect_rgb", **fields)
+            conn.execute(f'INSERT INTO "{table}" (' + ','.join(row) + ') VALUES (' + ','.join('?' for _ in row) + ')', tuple(row.values()))
+        for idx in poses:
+            for role, ref in (("pose2d", "2d.npz"), ("conf2d", "conf.npz")):
+                add("SAMPLE_ARTIFACT", sample_index=idx, point_cloud_version_id="", artifact_role=role,
+                    artifact_ref=ref, storage_key="artifact_store", artifact_format="ragged_npz")
+        for info in infos:
+            add("SAMPLE_ARTIFACT", sample_index=info.sample_index, point_cloud_version_id="", artifact_role="activity",
+                artifact_ref="activity.jsonl", storage_key="artifact_store", artifact_format="jsonl",
+                artifact_member_key=json.dumps(dict(byte_offset=info.byte_offset, nbytes=info.nbytes)))
+        add("RUN_TIMELINE_MODEL", timeline_model_id="rgb_pts_elapsed", timeline_model_type="identity_observed")
+        add("SAMPLE_TIME_ESTIMATE", sample_index=2, timeline_model_id="rgb_pts_elapsed", time_value_sec=2.125, time_kind="pts_based")
+        add("RUN_ASSET", asset_id="video", asset_role="rgb_video", storage_key="rgb", asset_ref="S/K1/rgb.mp4")
+        conn.execute("UPDATE SAMPLE_SUMMARY SET num_2d=3, num_people=4 WHERE run_id='K1' AND sample_index=2")
+    camera = tmp_path / "kinect" / "S" / "K1" / "kinect_camera_recording_calibration.json"
+    camera.parent.mkdir(parents=True)
+    document = {"CalibrationInformation": {"Cameras": [{"Purpose": "test", "Intrinsics": {"ModelParameters": [0.5]}}]}}
+    camera.write_text(json.dumps(document))
+    before = {p: file_hash(p) for p in [args["sqlite_path"], camera, *root.glob("*")]}
+    export_training_data(**args, kinect_root=tmp_path / "kinect")
+    with h5py.File(next(args["output"].glob("*.pose.h5")), "r") as h:
+        assert h["frames/pose2d_payload_available"][:3].tolist() == [True, False, True]
+        assert h["frames/pose2d_person_count"][:3].tolist() == [0, 0, 3]
+        assert h["frames/pose_person_count"][2] == 2
+        assert h["frames/num_people"][2] == 4
+        assert h["frames/num_2d"][2] == 3
+        assert h["frames/num_3d"][2] == 2
+        np.testing.assert_allclose(h["poses2d/xy"][:], poses[2][..., :2], equal_nan=True)
+        np.testing.assert_allclose(h["poses2d/confidence"][:], 0.75)
+        np.testing.assert_allclose(h["poses2d/bbox_confidence"][:], [0.9, 0.8, 0.7])
+        assert not h["poses2d/finite_xy"][1, 4]
+        assert json.loads(h["poses2d"].attrs["joint_names_json"])[19] == "Hip_Center"
+        assert json.loads(h["frames/activity_json"][2]) == {"01-Activity": ["飲む", "drink"]}
+        assert json.loads(h["frames/activity_json"][1]) is None
+        assert h["frames/activity_payload_available"][:3].tolist() == [True, False, True]
+        assert h["frames/rgb_pts_s"][2] == 2.125
+        assert np.isnan(h["frames/rgb_pts_s"][0])
+    manifest = json.loads((args["output"] / "manifest.json").read_text())
+    kinect = manifest["selections"][0]["kinect"]
+    assert kinect["camera_calibration"]["document"] == document
+    assert kinect["camera_calibration"]["sha256"] == file_hash(camera)
+    assert kinect["video_assets"][0]["asset_ref"] == "S/K1/rgb.mp4"
+    assert not kinect["video_included"]
+    assert {r["artifact_ref"] for r in manifest["source_artifacts"]} >= {"2d.npz", "conf.npz", "activity.jsonl"}
+    assert all(file_hash(p) == digest for p, digest in before.items())
+
+
+def test_missing_2d_is_explicit_and_supplied_camera_root_is_required(tmp_path):
+    args = make_source(tmp_path)
+    with pytest.raises(ValueError, match="Missing or non-portable"):
+        export_training_data(**args, kinect_root=tmp_path / "absent", dry_run=True)
+    assert not args["output"].exists()
+    export_training_data(**args)
+    with h5py.File(next(args["output"].glob("*.pose.h5")), "r") as h:
+        assert h["poses2d/xy"].shape == (0, 26, 2)
+        assert not h["frames/pose2d_payload_available"][:].any()
+        assert not h["frames/conf2d_payload_available"][:].any()
+        assert np.all(h["frames/num_2d"][:] == -1)
+
+
+def test_2d_bbox_count_mismatch_does_not_publish_export(tmp_path):
+    args = make_source(tmp_path)
+    root = args["artifact_root"]
+    RaggedNpzWriter.write(root / "2d.npz", {0: np.zeros((1, 26, 3))})
+    RaggedNpzWriter.write(root / "conf.npz", {0: np.zeros(2)}, tail_shape=())
+    with sqlite3.connect(args["sqlite_path"]) as conn:
+        for role, ref in (("pose2d", "2d.npz"), ("conf2d", "conf.npz")):
+            conn.execute("INSERT INTO SAMPLE_ARTIFACT (subject_id,run_id,device_type,sample_index,point_cloud_version_id,artifact_role,artifact_ref,storage_key,artifact_format) VALUES ('S','K1','kinect_rgb',0,'',?,?,'artifact_store','ragged_npz')", (role, ref))
+    with pytest.raises(ValueError, match="bounding-box scores"):
+        export_training_data(**args)
+    assert not args["output"].exists()
+
+
 def test_piecewise_predicted_times_and_no_extrapolation(tmp_path):
     args = make_source(tmp_path)
     with sqlite3.connect(args["sqlite_path"]) as c:
@@ -137,6 +222,60 @@ def test_nearest_tolerance_and_tie_break():
     indices, residuals = _nearest(np.array([0.5, 1.9, 4.0]), np.array([0.0, 1.0, 2.0]), 600)
     np.testing.assert_array_equal(indices, [0, 2, -1])
     np.testing.assert_allclose(residuals, [-500, 100, -2000])
+
+
+def test_subject_calibration_inputs_may_differ_but_exact_provenance_is_retained(tmp_path):
+    args = make_source(tmp_path)
+    with sqlite3.connect(args["sqlite_path"]) as conn:
+        conn.row_factory = sqlite3.Row
+        first = dict(conn.execute("SELECT * FROM POINT_CLOUD_VERSION").fetchone())
+        manifest = json.loads(first["provenance_json"])["version"]
+        manifest["generator_metadata"]["calibration_sources"] = [{"sha256": "1" * 64}]
+        conn.execute("UPDATE POINT_CLOUD_VERSION SET provenance_json=?", (json.dumps({"version": manifest}),))
+        manifest["subject_id"] = "T"
+        manifest["generator_metadata"]["calibration_sources"] = [{"sha256": "2" * 64}]
+        binding = {k: manifest[k] for k in ("hdf5_sha256", "subject_id", "run_id", "device_type", "source_frame_number_base")}
+        new_id = "raw_" + json_hash(binding)
+        for table in SQLiteCoreStore(args["sqlite_path"]).list_tables():
+            columns = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')]
+            if "subject_id" not in columns:
+                continue
+            for original in list(conn.execute(f'SELECT * FROM "{table}" WHERE subject_id=\'S\'')):
+                row = dict(original)
+                row["subject_id"] = "T"
+                if row.get("point_cloud_version_id") == first["point_cloud_version_id"]:
+                    row["point_cloud_version_id"] = new_id
+                if table == "POINT_CLOUD_VERSION":
+                    row["provenance_json"] = json.dumps({"version": manifest})
+                conn.execute(f'INSERT INTO "{table}" (' + ','.join(row) + ') VALUES (' + ','.join('?' for _ in row) + ')', tuple(row.values()))
+    args["selections"].append(dict(subject_id="T", mapping_version_id="K1", point_cloud_version_id=new_id))
+    export_training_data(**args)
+    result = json.loads((args["output"] / "manifest.json").read_text())
+    assert result["subjects"] == ["S", "T"]
+    assert result["schema"] == "syncwb.training_export.v3"
+    assert result["processing_compatibility"]["schema"] == "syncwb.processing_compatibility.v2"
+    assert "calibration_sha256" not in result["processing_compatibility"]
+    assert [s["exact_processing_recipe"]["calibration_sha256"] for s in result["selections"]] == [["1" * 64], ["2" * 64]]
+    assert len({s["exact_processing_recipe_id"] for s in result["selections"]}) == 2
+    recipes_by_subject = {s["selection"]["subject_id"]: s["exact_processing_recipe_id"] for s in result["selections"]}
+    for segment in result["segments"]:
+        with h5py.File(args["output"] / segment["files"]["radar"]["path"], "r") as file:
+            assert file.attrs["processing_recipe_id"] == recipes_by_subject[segment["subject_id"]]
+            assert file.attrs["processing_compatibility_id"] == result["processing_compatibility_id"]
+
+
+def test_calibration_procedure_and_enabled_state_remain_compatibility_constraints(tmp_path):
+    from copy import deepcopy
+    from sync_workbench.services.training_export_service import processing_compatibility
+    args = make_source(tmp_path)
+    with sqlite3.connect(args["sqlite_path"]) as conn:
+        m = json.loads(conn.execute("SELECT provenance_json FROM POINT_CLOUD_VERSION").fetchone()[0])["version"]
+    calibrated = deepcopy(m)
+    calibrated["generator_metadata"]["calibration_sources"] = [{"sha256": "1" * 64}]
+    assert processing_compatibility(m) != processing_compatibility(calibrated)
+    other = deepcopy(calibrated)
+    other["generator_metadata"]["calibration_procedure"] = {"algorithm": "different"}
+    assert processing_compatibility(calibrated) != processing_compatibility(other)
 
 
 @pytest.mark.parametrize("change,match", [
@@ -273,4 +412,37 @@ def test_cli_selection_mode_and_help(tmp_path, capsys):
     assert main(["export-training-data", "--sqlite", str(args["sqlite_path"]), "--artifact-root", str(args["artifact_root"]),
                  "--output", str(args["output"]), "--selection", str(path), "--dry-run"]) == 0
     assert json.loads(capsys.readouterr().out)["dry_run"]
+    assert not args["output"].exists()
+
+
+def test_calibrated_export_matches_gui_geometry_and_preserves_radar(tmp_path):
+    from test_spatial_calibration import write_calibration
+    from sync_workbench.core.geometry import load_spatial_calibration
+    args = make_source(tmp_path)
+    path = write_calibration(tmp_path)
+    calibration = load_spatial_calibration(path)
+    before = file_hash(path)
+    export_training_data(**args, spatial_calibration_path=path)
+    manifest = json.loads((args["output"] / "manifest.json").read_text())
+    assert manifest["geometry"]["spatial_calibration"]["sha256"] == before
+    assert manifest["geometry"]["spatial_calibration"]["document"] == json.loads(path.read_text())
+    with h5py.File(next(args["output"].glob("*.pose.h5")), "r") as p:
+        expected = pose3d_to_world(np.full((1,32,4), [1000,2000,3000,2]), calibration=calibration)
+        np.testing.assert_allclose(p["poses/xyz"][0], expected[0], rtol=1e-6)
+        assert json.loads(p.attrs["geometry_json"]) == manifest["geometry"]
+        np.testing.assert_array_equal(p["poses/confidence"][:], 2)
+    with h5py.File(next(args["output"].glob("*.radar.h5")), "r") as r:
+        np.testing.assert_allclose(r["points/values"][0], points_sensor_to_world(np.array([[1,2,3,4,5,255]]))[0])
+    assert file_hash(path) == before
+
+
+def test_cli_calibration_is_forwarded_to_preflight(tmp_path, capsys):
+    from test_spatial_calibration import write_calibration
+    from sync_workbench.cli.main import main
+    args = make_source(tmp_path)
+    path = write_calibration(tmp_path)
+    assert main(["export-training-data", "--sqlite", str(args["sqlite_path"]), "--artifact-root", str(args["artifact_root"]),
+                 "--output", str(args["output"]), "--subject", "S", "--mapping-version", "K1",
+                 "--point-cloud-label", "selected cloud", "--spatial-calibration", str(path), "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["geometry"]["spatial_calibration"]["sha256"] == file_hash(path)
     assert not args["output"].exists()

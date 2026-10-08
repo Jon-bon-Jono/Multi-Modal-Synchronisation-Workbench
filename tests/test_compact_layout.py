@@ -17,6 +17,8 @@ def test_compact_status_does_not_squeeze_controls(sessions,qt_app,monkeypatch,tm
     from sync_workbench.experimental.anchoring_gui import main_window
 
     class SceneStandIn(QLabel):
+        def __init__(self, *, calibration=None):
+            super().__init__()
         def set_options(self,**kwargs):pass
         def set_scene(self,*args,**kwargs):self.setText('Point-cloud scene (layout test)')
 

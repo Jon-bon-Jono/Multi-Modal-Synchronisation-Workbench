@@ -2,6 +2,10 @@
 
 Backend-first implementation of the Multi-modal Synchronisation Workbench.
 
+For progressive Kinect/offline-radar subject ingestion into an existing master,
+use [`import-package`](docs/additive_ingestion.md). It validates identical repeats,
+rejects conflicts and adds missing data without resetting annotations or mappings.
+
 v0.2.2 keeps the v0.1/v0.2.1 canonical ingestion, nearest-time mapping, and artifact payload layers, then adds official backend support for anchor creation/export, piecewise-affine sync fitting, revised mapping generation, synthetic feasibility probes, simple RGB video-frame access, and a bare-bones experimental anchoring GUI. The GUI-facing boundary remains service-based: frontends should call services rather than reading temporary `.zst` files, artifact bundle internals, or SQLite tables directly.
 
 ## What the backend does
@@ -157,9 +161,13 @@ which constructs immutable bundles and preserves captured-frame identities.
 ## Export a point-cloud/raw-radar test sequence
 
 For reusable HPE datasets, use `export-training-data` instead. It exports separate
-offline radar and Kinect 3D-pose HDF5 files per overlapping run pair, with shared
+offline radar and Kinect 2D/3D-pose HDF5 files per overlapping run pair, with shared
 GUI geometry, relative timestamps, radar-centred correspondence and strict recipe/
-mapping consistency. See [training exports and the 19_MM command](docs/training_export.md).
+mapping consistency. See [the 09_SY + 19_MM export launcher and complete field reference](docs/training_export.md).
+Both the raw-cloud GUI and training exporter accept `--spatial-calibration PATH`
+for measured Kinect/radar alignment; see [calibration usage and geometry](docs/spatial_calibration.md).
+The prepared raw 19_MM `.bat` presets configure the bundled calibration internally,
+and calibrated student packages apply their bundled setting automatically.
 The older one-off online-cloud utility below is a different workflow.
 
 The short-lived exporter accepts original one-based RGB and point-cloud frame
