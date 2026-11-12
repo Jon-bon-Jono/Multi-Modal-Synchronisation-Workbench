@@ -118,7 +118,7 @@ def _read_package(input_dir, rgb_root):
             raise ValueError("Empty Kinect sample file")
         if rgb_root is None:
             raise ValueError("Kinect import requires --rgb-root to validate video references")
-        required = {"pose2d", "conf2d", "pose3d", "activity", "num_people"}
+        required = {"pose2d", "conf2d", "pose3d", "num_people"}
         if required - set(rgb.columns):
             raise ValueError(f"Kinect run package is missing payload columns: {sorted(required - set(rgb.columns))}")
         for (subject, run), group in rgb.groupby(["subject_id", "run_id"], dropna=False):

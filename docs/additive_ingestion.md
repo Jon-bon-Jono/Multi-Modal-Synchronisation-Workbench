@@ -27,6 +27,20 @@ At least one sample modality is required. RGB references must resolve under
 `--rgb-root`. The importer does not copy videos, read ADC or HDF5 source files, or
 rerun processing. Online-radar packages are deliberately rejected by this command.
 Extra catalogue rows are ignored; only runs selected by payloads are imported.
+
+Activity annotations are optional. An unlabelled Kinect run can omit the `activity`
+column; null/NaN values are also treated as unavailable when labelled and unlabelled
+runs share a dataframe. These frames have `has_activity=False` and no activity
+artifact. An actual empty dictionary remains an available annotation. Pose, video,
+people counts and timing are still required/preserved as before. Student anchoring
+packages can include unlabelled acquisitions; training exports represent missing
+activity as JSON `null` with `activity_payload_available=False`.
+
+The ETL subject-packaging notebook defaults to `ALLOW_MISSING_ACTIVITY=True`.
+This permits absent activity CSVs without generating labels, but existing CSVs must
+still have the expected columns and complete native-frame coverage. Set it to false
+to require annotations. Later changes to existing annotations/summary rows remain
+subject to conflict detection; this is not an annotation-overwrite workflow.
 Kinect-only and raw-only deliveries are supported. Missing modalities do not mean
 deletion. A later raw-only package can add another version of an existing run.
 

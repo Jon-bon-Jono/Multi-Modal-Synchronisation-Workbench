@@ -200,12 +200,15 @@ class ArtifactBuildService:
                 manifest_rows.append(row)
             report_rows.append({"subject_id": subject_id, "run_id": run_id, "device_type": device_type, "artifact_role": asset_role, "samples": len(infos), "artifact_ref": ref})
 
-        if "activity" in group.columns:
+        activity_by_index = {
+            int(r.sample_index): r.activity for r in group.itertuples(index=False)
+            if _has_activity(getattr(r, "activity", None))
+        }
+        if activity_by_index:
             ref = artifact_store.ref_for(subject_id, run_id, device_type, "activity.jsonl")
             path = artifact_store.path_for_ref(ref)
             _guard_overwrite(path, overwrite)
-            infos = IndexedJsonlWriter.write(path, [(int(r.sample_index), r.activity) for r in group.itertuples(index=False)])
-            activity_by_index = dict(zip(group.sample_index.astype(int), group.activity))
+            infos = IndexedJsonlWriter.write(path, activity_by_index.items())
             aid = asset_id(subject_id, run_id, device_type, "activity_jsonl")
             run_assets.append(self._run_asset_row(aid, subject_id, run_id, device_type, "activity_jsonl", ref, "activity per-sample JSONL bundle"))
             for info in infos:
@@ -417,6 +420,13 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _has_activity(value: Any) -> bool:
+    """Missing annotations are not an available empty label set."""
+    if isinstance(value, (dict, list, tuple, np.ndarray)):
+        return True
+    return value is not None and not bool(pd.isna(value))
+
+
 def _rgb_summary_row(row: Any, created_at: str) -> dict[str, Any]:
     pose2d_n = _first_dim(getattr(row, "pose2d", None), (26, 3))
     conf2d_n = _first_dim(getattr(row, "conf2d", None), tuple())
@@ -434,7 +444,7 @@ def _rgb_summary_row(row: Any, created_at: str) -> dict[str, Any]:
         "has_pose2d": bool(pose2d_n > 0),
         "has_conf2d": bool(conf2d_n > 0),
         "has_pose3d": bool(pose3d_n > 0),
-        "has_activity": hasattr(row, "activity"),
+        "has_activity": _has_activity(getattr(row, "activity", None)),
         "has_points": False,
         "created_at": created_at,
         "notes": "derived from rgb_samples payload columns",

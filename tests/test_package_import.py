@@ -66,6 +66,62 @@ def test_add_subject_dry_run_noop_and_repack(case):
     assert SQLiteCoreStore(args["sqlite_path"]).read_table("ANCHOR").anchor_id.tolist() == ["saved"]
 
 
+@pytest.mark.parametrize("activity_mode", ["absent", "null", "mixed"])
+def test_optional_activity_import_and_student_export(case, tmp_path, activity_mode):
+    from pathlib import Path
+    from sync_workbench.services.mapping_service import MappingService
+    from sync_workbench.sync.mapping import TimelineSelection
+    from sync_workbench.services.payload_service import PayloadService
+    from sync_workbench.deployment.student_package import export_student_package
+    from sync_workbench.deployment.package_layout import verify_package
+
+    args, vid = case
+    path = args["input_dir"] / "rgb_samples.zst"
+    rgb = pd.read_pickle(path)
+    if activity_mode == "absent":
+        rgb = rgb.drop(columns="activity")
+    else:
+        rgb["activity"] = [None, np.nan, {} if activity_mode == "mixed" else pd.NA]
+    rgb.to_pickle(path)
+    service = PackageImportService()
+    before = snapshot(args)
+    service.import_package(**args, dry_run=True)
+    assert snapshot(args) == before
+    service.import_package(**args)
+    store = SQLiteCoreStore(args["sqlite_path"])
+    summary = store.read_table("SAMPLE_SUMMARY")
+    summary = summary[summary.device_type == "kinect_rgb"].sort_values("sample_index")
+    assert summary.has_activity.astype(int).tolist() == [0, 0, int(activity_mode == "mixed")]
+    payloads = PayloadService(args["sqlite_path"], args["artifact_root"])
+    with pytest.raises(KeyError, match="No artifact role"):
+        payloads.get_payload("P", "K", "kinect_rgb", 0, "activity")
+    assert payloads.get_payload("P", "K", "kinect_rgb", 0, "pose3d").shape == (1, 32, 4)
+    if activity_mode == "mixed":
+        assert payloads.get_payload("P", "K", "kinect_rgb", 2, "activity") == {}
+    else:
+        assert not list(args["artifact_root"].rglob("activity.jsonl"))
+    assert service.import_package(**args)["status"] == "already_imported"
+
+    cloud = store.read_table("POINT_CLOUD_VERSION")
+    raw_run = cloud.loc[cloud.point_cloud_version_id == vid, "run_id"].iloc[0]
+    MappingService(args["sqlite_path"]).generate_nearest_mapping(
+        TimelineSelection("P", "K", "kinect_rgb", "rgb_wallclock_from_pts"),
+        TimelineSelection("P", raw_run, "radar_raw", "radar_raw_wallclock_from_start_end"),
+        mapping_version_id="optional_activity_initial", top_k=1)
+    output = tmp_path / "student"
+    export_student_package(sqlite_path=args["sqlite_path"], artifact_root=args["artifact_root"],
+        rgb_root=args["rgb_root"], output=output, subject_id="P",
+        mapping_version_id="optional_activity_initial", point_cloud_version_id=vid,
+        application_root=Path(__file__).resolve().parents[1])
+    assert verify_package(output)["full_checksums"]
+    student = PayloadService(output / "database/template.sqlite", output / "assets/artifacts")
+    with pytest.raises(KeyError, match="No artifact role"):
+        student.get_payload("P", "K", "kinect_rgb", 0, "activity")
+    assert student.get_payload("P", "K", "kinect_rgb", 0, "pose3d").shape == (1, 32, 4)
+    if activity_mode == "mixed":
+        assert student.get_payload("P", "K", "kinect_rgb", 2, "activity") == {}
+
+
 @pytest.mark.parametrize("change", ["pose", "timing", "coverage", "version", "video"])
 def test_conflicts_leave_master_unchanged(case, change):
     args, _ = case
